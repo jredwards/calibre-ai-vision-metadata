@@ -713,8 +713,12 @@ class AIVisionAction(InterfaceAction):
                 # --- Strip null/empty values returned by the AI ---
                 # JSON null becomes Python None; the AI also sometimes returns the string "null".
                 # Remove these so downstream code never writes a blank value over existing data.
-                NULL_VALUES = {None, 'null', 'None', ''}
-                metadata = {k: v for k, v in metadata.items() if v not in NULL_VALUES}
+                # Lists (tags, languages) can't be hashed, so check them separately.
+                def _is_null(v):
+                    if isinstance(v, list):
+                        return len(v) == 0
+                    return v in (None, 'null', 'None', '')
+                metadata = {k: v for k, v in metadata.items() if not _is_null(v)}
                 # ---------------------------------------------------
 
                 # --- Inject dynamic provider, model, and duration ---
