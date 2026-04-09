@@ -470,9 +470,32 @@ class AIVisionAction(InterfaceAction):
             from calibre.gui2 import error_dialog
             return error_dialog(self.gui, _('No Selection'), _('Please select at least one book.'), show=True)
 
-        # Build the queue of Book IDs from the highlighted rows
+        book_count = len(rows)
         self.batch_queue = [self.gui.library_view.model().id(row) for row in rows]
-        
+
+        if book_count > 1:
+            # Ask for permission before running unattended on multiple books
+            enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
+            field_labels = [label for key, label in ALL_FIELDS if key in enabled_fields]
+            field_list = ', '.join(field_labels) if field_labels else _('(none — check your settings)')
+
+            from calibre.gui2 import question_dialog
+            confirmed = question_dialog(
+                self.gui,
+                _('Batch Process {0} Books?').format(book_count),
+                _('<p>You have selected <b>{0} books</b>.</p>'
+                  '<p>The AI will process each cover and automatically apply the following '
+                  'fields without asking you to review each one:</p>'
+                  '<p><b>{1}</b></p>'
+                  '<p>Proceed?</p>').format(book_count, field_list),
+                default_yes=False
+            )
+            if not confirmed:
+                return
+            self.batch_auto_apply = True
+        else:
+            self.batch_auto_apply = False
+
         # Start the assembly line
         self.process_next_in_queue()
 
@@ -686,14 +709,21 @@ class AIVisionAction(InterfaceAction):
                 
             try:
                 metadata = json.loads(clean_json)
-                
+
+                # --- Strip null/empty values returned by the AI ---
+                # JSON null becomes Python None; the AI also sometimes returns the string "null".
+                # Remove these so downstream code never writes a blank value over existing data.
+                NULL_VALUES = {None, 'null', 'None', ''}
+                metadata = {k: v for k, v in metadata.items() if v not in NULL_VALUES}
+                # ---------------------------------------------------
+
                 # --- Inject dynamic provider, model, and duration ---
                 elapsed = time.time() - start_time
                 metadata['ai_provider'] = provider
                 metadata['ai_model_used'] = model_name
                 metadata['api_duration'] = round(elapsed, 1) # Rounds to one decimal place
                 # ----------------------------------------------------
-                
+
             except json.JSONDecodeError as e:
                 return {"error_msg": _("Data Parsing Error: Could not read AI output.\nRaw Output: {0}...").format(raw_text[:150])}
 
@@ -748,28 +778,100 @@ class AIVisionAction(InterfaceAction):
             book_id, metadata, cover_path = job.result
             self.signals.review_signal.emit(book_id, metadata, cover_path)
             
+    def _build_approved_data(self, metadata, enabled_fields):
+        """Convert raw AI metadata into the approved_data dict that apply_metadata() expects.
+
+        Only includes fields that are both enabled in settings and have a non-null value.
+        Mirrors the field transformations the review dialog applies (list→CSV, pubdate assembly, etc.).
+        """
+        NULL_VALUES = (None, 'null', 'None', '')
+        approved = {}
+
+        if 'title' in enabled_fields:
+            val = metadata.get('title')
+            if val not in NULL_VALUES:
+                approved['title'] = str(val).strip()
+
+        if 'authors' in enabled_fields:
+            raw = metadata.get('creators')
+            if not raw:
+                raw = metadata.get('editor') or metadata.get('author')
+                raw = [raw] if raw else []
+            creators_str = ', '.join(str(c) for c in raw if c) if isinstance(raw, list) else str(raw)
+            if creators_str.strip():
+                approved['authors'] = creators_str.strip()
+
+        if 'series' in enabled_fields:
+            val = metadata.get('series')
+            if val not in NULL_VALUES:
+                approved['series'] = str(val).strip()
+
+        if 'series_index' in enabled_fields:
+            val = metadata.get('series_index')
+            if val not in NULL_VALUES:
+                approved['series_index'] = str(val).strip()
+
+        if 'tags' in enabled_fields:
+            tags = metadata.get('tags')
+            if tags:
+                approved['tags'] = ', '.join(str(t) for t in tags if t) if isinstance(tags, list) else str(tags)
+
+        if 'languages' in enabled_fields:
+            langs = metadata.get('languages')
+            if langs:
+                approved['languages'] = ', '.join(str(l) for l in langs if l) if isinstance(langs, list) else str(langs)
+
+        if 'publisher' in enabled_fields:
+            val = metadata.get('publisher')
+            if val not in NULL_VALUES:
+                approved['publisher'] = str(val).strip()
+
+        if 'pubdate' in enabled_fields:
+            year_raw = metadata.get('pub_year')
+            if year_raw and str(year_raw).strip().isdigit():
+                year = str(year_raw).strip()
+                month_raw = metadata.get('pub_month')
+                month = str(month_raw).strip().zfill(2) if month_raw and str(month_raw).strip().isdigit() else '01'
+                day_raw = metadata.get('pub_day')
+                day = str(day_raw).strip().zfill(2) if day_raw and str(day_raw).strip().isdigit() else '01'
+                approved['pubdate'] = f'{year}-{month}-{day}'
+
+        if 'identifiers' in enabled_fields:
+            val = metadata.get('ids')
+            if val not in NULL_VALUES:
+                approved['identifiers'] = str(val).strip()
+
+        if 'comments' in enabled_fields:
+            val = metadata.get('comments')
+            if val not in NULL_VALUES:
+                approved['comments'] = str(val).strip()
+
+        return approved
+
     def _show_review_dialog(self, book_id, metadata, cover_path):
         try:
-            from calibre_plugins.ai_vision_metadata.ui import MetadataReviewDialog
-            from calibre.gui2 import error_dialog
-            
-            # Pass the cover_path and enabled fields into the Dialog
             enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
-            d = MetadataReviewDialog(self.gui, metadata, cover_path, enabled_fields)
-            result = d.exec_()
-            
-            approved_data = d.get_approved_data() if result == d.Accepted else None
-            
-            d.setParent(None)
-            d.deleteLater()
-            
-            if approved_data:
-                self.apply_metadata(book_id, approved_data)
-                
+
+            if getattr(self, 'batch_auto_apply', False):
+                # Batch mode: build approved_data from raw metadata and apply directly
+                approved_data = self._build_approved_data(metadata, enabled_fields)
+                if approved_data:
+                    self.apply_metadata(book_id, approved_data)
+            else:
+                # Single-book mode: show the interactive review dialog
+                from calibre_plugins.ai_vision_metadata.ui import MetadataReviewDialog
+                d = MetadataReviewDialog(self.gui, metadata, cover_path, enabled_fields)
+                result = d.exec_()
+                approved_data = d.get_approved_data() if result == d.Accepted else None
+                d.setParent(None)
+                d.deleteLater()
+                if approved_data:
+                    self.apply_metadata(book_id, approved_data)
+
         except Exception as e:
             from calibre.gui2 import error_dialog
-            error_dialog(self.gui, _('UI Error'), _('Could not launch review: {0}').format(str(e)), show=True)
-            
+            error_dialog(self.gui, _('UI Error'), _('Could not process book: {0}').format(str(e)), show=True)
+
         finally:
             # --- Trigger the next book in the queue when the window closes ---
             self.process_next_in_queue()
