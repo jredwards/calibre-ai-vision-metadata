@@ -5,9 +5,9 @@ import json
 import urllib.request
 import datetime
 import os
-from qt.core import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-                     QComboBox, QPushButton, QMessageBox, QIcon, QPixmap, 
-                     pyqtSignal, Qt, QObject, QSpinBox, QMenu, QTextEdit)
+from qt.core import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
+                     QComboBox, QPushButton, QMessageBox, QIcon, QPixmap,
+                     pyqtSignal, Qt, QObject, QSpinBox, QMenu, QTextEdit, QCheckBox)
 
 from calibre.gui2 import error_dialog
 from calibre.gui2.actions import InterfaceAction
@@ -24,27 +24,41 @@ class WorkerSignals(QObject):
     error_signal = pyqtSignal(str)  
 
 DEFAULT_PROMPT = (
-    "Analyze this publication cover. Your PRIMARY task is to read and extract information "
-    "visibly printed on THIS specific cover. "
-    "If the specific issue number, exact publication date, or current editor/publisher is not "
-    "printed on the cover, use your Google Search tool to find the official publication details "
-    "for this exact issue. Do NOT substitute data from older or different issues. "
-    "Return ONLY a JSON object with the following keys. "
-    "Format requirements: "
-    "'series' (string: the base name of the publication), "
-    "'volume' (string: the volume number ONLY, converted to standard Arabic numerals, e.g., '48' instead of 'XLVIII'), "
-    "'issue_number' (string: the absolute issue number ONLY, converted to standard Arabic numerals. Do not include the volume.), "
-    "'title' (string: format strictly as '[Publication Name], [Date], Volume [Vol], Issue [Num]'), "
-    "'creators' (list of strings: the main artists or authors. If this is a magazine, you MUST use Google Search to find the current Editor-in-Chief or Managing Editor for this date and list them here), "
-    "'pub_year' (integer: the specific year of this issue), "
-    "'pub_month' (integer), 'pub_day' (integer), "
-    "'publisher' (string: the publishing company or organization), "
-    "'ids' (string: format as 'issn:XXXX-XXXX' or 'isbn:XXXXXXXXXX'), "
-    "'format_type' (string: e.g., 'magazine', 'comic', 'newspaper', 'book'), "
-    "'comments' (string: A brief, 2-to-3 sentence description or summary of this specific issue based on the cover art, headline teasers, and web search context. Explicitly list the main themes, articles, or stories if they are readily available), "
-    "'tags' (list of strings: relevant subjects based on the specific cover art and text), "
-    "'languages' (list of strings: the 3-letter ISO 639-2 language codes, e.g., ['eng'], ['rus'], or ['deu'])."
+    "Analyze this book cover. Your PRIMARY task is to read and extract information "
+    "visibly printed on this specific cover. "
+    "Return ONLY a JSON object with the following keys: "
+    "'title' (string: the book title exactly as printed on the cover, excluding any subtitle), "
+    "'subtitle' (string: the subtitle if present, otherwise null), "
+    "'creators' (list of strings: authors, editors, or illustrators as printed on the cover, in the order they appear), "
+    "'series' (string: the series name if this book is part of a series, otherwise null), "
+    "'series_index' (string: the volume or book number within the series if printed, otherwise null), "
+    "'publisher' (string: the publishing company if visible on the cover, otherwise null), "
+    "'pub_year' (integer: the publication year if visible, otherwise null), "
+    "'ids' (string: ISBN in the format 'isbn:XXXXXXXXXX' if visible on the cover, otherwise null), "
+    "'languages' (list of strings: 3-letter ISO 639-2 language codes based on the language of the text on the cover, e.g. ['eng']), "
+    "'format_type' (string: always 'book'), "
+    "'tags' (list of strings: genre or subject tags inferred from the cover art, title, and any visible text), "
+    "'comments' (string: a 1-to-2 sentence description of the book based solely on what is visible on the cover — do not speculate or infer content beyond what is shown). "
+    "Do NOT use web search to supplement missing fields. "
+    "If a field cannot be determined from the cover, return null for that field. "
+    "Do not guess or infer values that are not visibly printed."
 )
+
+# Ordered list of (pref_key, display_label) for every field the plugin can write.
+# This drives both the config checkboxes and the review dialog.
+ALL_FIELDS = [
+    ('title',        'Title'),
+    ('authors',      'Creator(s)'),
+    ('series',       'Series'),
+    ('series_index', 'Series Index'),
+    ('tags',         'Tags'),
+    ('languages',    'Languages'),
+    ('publisher',    'Publisher'),
+    ('pubdate',      'Published Date'),
+    ('identifiers',  'Identifiers'),
+    ('comments',     'Comments'),
+]
+ALL_FIELD_KEYS = [k for k, _ in ALL_FIELDS]
 
 class ConfigWidget(QWidget):
     def __init__(self):
@@ -146,11 +160,29 @@ class ConfigWidget(QWidget):
         self.l.addWidget(self.label_timeout)
         
         self.timeout_spin = QSpinBox(self)
-        self.timeout_spin.setRange(30, 86400) 
+        self.timeout_spin.setRange(30, 86400)
         self.timeout_spin.setValue(int(prefs.get('timeout', 300)))
         self.l.addWidget(self.timeout_spin)
 
-        # --- 6. Prompt Tuning Area (Dedicated Memory Banks) ---
+        # --- 6. Default Fields to Update ---
+        self.label_fields = QLabel(_('Default Fields to Update:'))
+        self.l.addWidget(self.label_fields)
+
+        self.fields_grid_widget = QWidget()
+        self.fields_grid = QGridLayout(self.fields_grid_widget)
+        self.fields_grid.setContentsMargins(0, 0, 0, 0)
+
+        enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
+        self.field_checkboxes = {}
+        for i, (key, label) in enumerate(ALL_FIELDS):
+            chk = QCheckBox(_(label))
+            chk.setChecked(key in enabled_fields)
+            self.fields_grid.addWidget(chk, i // 2, i % 2)
+            self.field_checkboxes[key] = chk
+
+        self.l.addWidget(self.fields_grid_widget)
+
+        # --- 7. Prompt Tuning Area (Dedicated Memory Banks) ---
         self.prompt_layout = QHBoxLayout()
         self.label_prompt = QLabel(_('System Prompt (Advanced):'))
         
@@ -359,6 +391,9 @@ class ConfigWidget(QWidget):
         
         # 5. Save General Settings
         prefs['timeout'] = self.timeout_spin.value()
+
+        # 6. Save enabled fields
+        prefs['enabled_fields'] = [key for key, _ in ALL_FIELDS if self.field_checkboxes[key].isChecked()]
 
 class AIVisionAction(InterfaceAction):
     name = 'AI Vision Metadata' # DO NOT TRANSLATE
@@ -718,8 +753,9 @@ class AIVisionAction(InterfaceAction):
             from calibre_plugins.ai_vision_metadata.ui import MetadataReviewDialog
             from calibre.gui2 import error_dialog
             
-            # Pass the cover_path into the Dialog
-            d = MetadataReviewDialog(self.gui, metadata, cover_path)
+            # Pass the cover_path and enabled fields into the Dialog
+            enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
+            d = MetadataReviewDialog(self.gui, metadata, cover_path, enabled_fields)
             result = d.exec_()
             
             approved_data = d.get_approved_data() if result == d.Accepted else None

@@ -8,14 +8,20 @@ except NameError:
     pass
 
 class MetadataReviewDialog(QDialog):
-    def __init__(self, parent, metadata, cover_path):
+    def __init__(self, parent, metadata, cover_path, enabled_fields=None):
         super().__init__(parent)
         self.setWindowTitle(_("Review AI Metadata"))
         self.setMinimumWidth(900)
-        
+
         self.layout = QVBoxLayout(self)
         self.metadata = metadata
         self.results = {}
+
+        # Fall back to all fields if no preference has been saved yet
+        ALL_FIELD_KEYS = ['title', 'authors', 'series', 'series_index', 'tags',
+                          'languages', 'publisher', 'pubdate', 'identifiers', 'comments']
+        if enabled_fields is None:
+            enabled_fields = ALL_FIELD_KEYS
         
         # --- Centered Model Header ---
         model_name = metadata.get('ai_model_used', _('Unknown Model'))
@@ -142,57 +148,76 @@ class MetadataReviewDialog(QDialog):
             self.results[key] = {'checkbox': chk, 'widget': edit}
 
         # --- BUILD THE FORM ---
-        add_field("title", _("Title"), metadata.get('title', ''), _("Replaces"))
-        
-        raw_creators = metadata.get('creators')
-        if not raw_creators:
-            rogue_editor = metadata.get('editor')
-            rogue_author = metadata.get('author')
-            if rogue_editor: raw_creators = [rogue_editor]
-            elif rogue_author: raw_creators = [rogue_author]
-            else: raw_creators = []
-        
-        creators_str = ", ".join(raw_creators) if isinstance(raw_creators, list) else str(raw_creators)
-        add_field("authors", _("Creators"), creators_str, _("Replaces"))
+        if 'title' in enabled_fields:
+            add_field("title", _("Title"), metadata.get('title', ''), _("Replaces"))
 
-        series_val = str(metadata.get('series', '')).strip()
-        vol = str(metadata.get('volume', '')).strip()
-        iss = str(metadata.get('issue_number', '')).strip()
-        
-        index_options = []
-        if vol and iss and vol.isdigit() and iss.isdigit():
-            index_options.append(f"{vol}.{iss.zfill(2)}")
-            
-        if iss: index_options.append(iss)
-        if vol: index_options.append(vol)
-        if metadata.get('day_of_year'):
-            index_options.append(str(metadata.get('day_of_year')))
-            
-        add_indented_combo_field('series', _('Series:'), [series_val], _("Replaces"))
-        add_indented_combo_field('series_index', _('Series Index:'), index_options, _("Replaces"))
+        if 'authors' in enabled_fields:
+            raw_creators = metadata.get('creators')
+            if not raw_creators:
+                rogue_editor = metadata.get('editor')
+                rogue_author = metadata.get('author')
+                if rogue_editor: raw_creators = [rogue_editor]
+                elif rogue_author: raw_creators = [rogue_author]
+                else: raw_creators = []
+            creators_str = ", ".join(raw_creators) if isinstance(raw_creators, list) else str(raw_creators)
+            add_field("authors", _("Creators"), creators_str, _("Replaces"))
 
-        tags_str = ", ".join(metadata.get('tags', [])) if isinstance(metadata.get('tags', []), list) else str(metadata.get('tags', ''))
-        add_field("tags", _("Tags"), tags_str, _("Merges"))
+        if 'series' in enabled_fields or 'series_index' in enabled_fields:
+            series_val = str(metadata.get('series', '')).strip()
+            vol = str(metadata.get('volume', '')).strip()
+            iss = str(metadata.get('issue_number', '')).strip()
+            direct_index = str(metadata.get('series_index', '')).strip()
 
-        langs_str = ", ".join(metadata.get('languages', ['eng'])) if isinstance(metadata.get('languages', ['eng']), list) else str(metadata.get('languages', 'eng'))
-        add_field("languages", _("Languages"), langs_str, _("Replaces"))
+            index_options = []
+            if direct_index and direct_index not in ('None', 'null', ''):
+                index_options.append(direct_index)
+            if vol and iss and vol.isdigit() and iss.isdigit():
+                combined = f"{vol}.{iss.zfill(2)}"
+                if combined not in index_options:
+                    index_options.append(combined)
+            if iss and iss not in index_options:
+                index_options.append(iss)
+            if vol and vol not in index_options:
+                index_options.append(vol)
+            if metadata.get('day_of_year'):
+                doy = str(metadata.get('day_of_year'))
+                if doy not in index_options:
+                    index_options.append(doy)
 
-        add_field("publisher", _("Publisher"), metadata.get('publisher', ''), _("Replaces"))
+            if 'series' in enabled_fields:
+                add_indented_combo_field('series', _('Series:'), [series_val], _("Replaces"))
+            if 'series_index' in enabled_fields:
+                add_indented_combo_field('series_index', _('Series Index:'), index_options, _("Replaces"))
 
-        year_raw = metadata.get('pub_year')
-        if year_raw and str(year_raw).strip().isdigit():
-            year = str(year_raw).strip()
-            month_raw = metadata.get('pub_month')
-            month = str(month_raw).strip().zfill(2) if month_raw and str(month_raw).strip().isdigit() else "01"
-            day_raw = metadata.get('pub_day')
-            day = str(day_raw).strip().zfill(2) if day_raw and str(day_raw).strip().isdigit() else "01"
-            pub_date = f"{year}-{month}-{day}"
-        else:
-            pub_date = ""
-            
-        add_field("pubdate", _("Published"), pub_date, _("Replaces"))
-        add_field("identifiers", _("Identifiers"), metadata.get('ids', ''), _("Merges")) # IDs use the merge logic!
-        add_text_area("comments", _("Comments"), metadata.get('comments', ''), _("Appends")) # Comments stack via HTML break
+        if 'tags' in enabled_fields:
+            tags_str = ", ".join(metadata.get('tags', [])) if isinstance(metadata.get('tags', []), list) else str(metadata.get('tags', ''))
+            add_field("tags", _("Tags"), tags_str, _("Merges"))
+
+        if 'languages' in enabled_fields:
+            langs_str = ", ".join(metadata.get('languages', ['eng'])) if isinstance(metadata.get('languages', ['eng']), list) else str(metadata.get('languages', 'eng'))
+            add_field("languages", _("Languages"), langs_str, _("Replaces"))
+
+        if 'publisher' in enabled_fields:
+            add_field("publisher", _("Publisher"), metadata.get('publisher', ''), _("Replaces"))
+
+        if 'pubdate' in enabled_fields:
+            year_raw = metadata.get('pub_year')
+            if year_raw and str(year_raw).strip().isdigit():
+                year = str(year_raw).strip()
+                month_raw = metadata.get('pub_month')
+                month = str(month_raw).strip().zfill(2) if month_raw and str(month_raw).strip().isdigit() else "01"
+                day_raw = metadata.get('pub_day')
+                day = str(day_raw).strip().zfill(2) if day_raw and str(day_raw).strip().isdigit() else "01"
+                pub_date = f"{year}-{month}-{day}"
+            else:
+                pub_date = ""
+            add_field("pubdate", _("Published"), pub_date, _("Replaces"))
+
+        if 'identifiers' in enabled_fields:
+            add_field("identifiers", _("Identifiers"), metadata.get('ids', ''), _("Merges"))
+
+        if 'comments' in enabled_fields:
+            add_text_area("comments", _("Comments"), metadata.get('comments', ''), _("Appends"))
 
         self.form_layout.addStretch(1)
 
