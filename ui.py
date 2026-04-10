@@ -39,7 +39,50 @@ class MetadataReviewDialog(QDialog):
         self.line.setFrameShadow(QFrame.Shadow.Sunken)
         self.layout.addWidget(self.line)
         # ----------------------------------
-        
+
+        # --- Google Books Verification Banner ---
+        verification = metadata.get('_verification')
+        if verification:
+            status      = verification.get('status', 'unverified')
+            corrections = verification.get('corrections', {})
+            title_fix   = corrections.get('title')
+            author_fix  = corrections.get('authors')
+
+            # Build individual correction lines
+            lines = []
+            if title_fix:
+                lines.append(_('\u270e Title: \u201c{0}\u201d \u2192 \u201c{1}\u201d').format(
+                    title_fix.get('from', ''), title_fix.get('to', '')))
+            if author_fix:
+                from_val = author_fix.get('from')
+                to_val   = author_fix.get('to', '')
+                if from_val:
+                    lines.append(_('\u270e Author: \u201c{0}\u201d \u2192 \u201c{1}\u201d').format(from_val, to_val))
+                else:
+                    lines.append(_('\u270e Author supplied: \u201c{0}\u201d').format(to_val))
+
+            if status == 'verified':
+                badge_color = '#2e7d32'   # green
+                badge_text  = _('\u2713 Verified against Google Books')
+            elif status == 'corrected':
+                badge_color = '#1565c0'   # blue
+                badge_text  = _('\u270e Corrected via Google Books') + (
+                    '<br>' + '<br>'.join(lines) if lines else '')
+            elif status == 'title_only':
+                badge_color = '#e65100'   # amber
+                badge_text  = _('\u26a0 Title matched on Google Books but author could not be verified')
+                if lines:
+                    badge_text += '<br>' + '<br>'.join(lines)
+            else:
+                badge_color = '#757575'   # grey
+                badge_text  = _('\u2013 Could not verify against Google Books')
+
+            banner = QLabel(f"<span style='color:{badge_color}; font-size:11px;'>{badge_text}</span>")
+            banner.setWordWrap(True)
+            banner.setContentsMargins(4, 4, 4, 4)
+            self.layout.addWidget(banner)
+        # ----------------------------------
+
         # --- Side-by-Side Layout Container ---
         self.middle_layout = QHBoxLayout()
         
