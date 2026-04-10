@@ -34,16 +34,13 @@ DEFAULT_PROMPT = (
     "Analyze this book cover. Your PRIMARY task is to read and extract information "
     "visibly printed on this specific cover. "
     "Return ONLY a JSON object with the following keys: "
-    "'title' (string: the book title exactly as printed on the cover, excluding any subtitle), "
-    "'subtitle' (string: the subtitle if present, otherwise null), "
+    "'title' (string: the full book title as printed on the cover), "
     "'creators' (list of strings: authors, editors, or illustrators as printed on the cover, in the order they appear), "
     "'series' (string: the series name if this book is part of a series, otherwise null), "
     "'series_index' (string: the volume or book number within the series if printed, otherwise null), "
     "'publisher' (string: the publishing company if visible on the cover, otherwise null), "
     "'pub_year' (integer: the publication year if visible, otherwise null), "
-    "'ids' (string: ISBN in the format 'isbn:XXXXXXXXXX' if visible on the cover, otherwise null), "
     "'languages' (list of strings: 3-letter ISO 639-2 language codes based on the language of the text on the cover, e.g. ['eng']), "
-    "'format_type' (string: always 'book'), "
     "'tags' (list of strings: genre or subject tags inferred from the cover art, title, and any visible text), "
     "'comments' (string: a 1-to-2 sentence description of the book based solely on what is visible on the cover — do not speculate or infer content beyond what is shown). "
     "Do NOT use web search to supplement missing fields. "
@@ -149,11 +146,19 @@ class ConfigWidget(QWidget):
         # --- 5. Timeout Configuration ---
         self.label_timeout = QLabel(_('Network Timeout (seconds):'))
         self.l.addWidget(self.label_timeout)
-        
+
         self.timeout_spin = QSpinBox(self)
         self.timeout_spin.setRange(30, 86400)
         self.timeout_spin.setValue(int(prefs.get('timeout', 300)))
         self.l.addWidget(self.timeout_spin)
+
+        self.label_delay = QLabel(_('Delay Between Batch Requests (seconds):'))
+        self.l.addWidget(self.label_delay)
+
+        self.delay_spin = QSpinBox(self)
+        self.delay_spin.setRange(0, 60)
+        self.delay_spin.setValue(int(prefs.get('batch_delay', 2)))
+        self.l.addWidget(self.delay_spin)
 
         # --- 6. Default Fields to Update ---
         self.label_fields = QLabel(_('Default Fields to Update:'))
@@ -382,6 +387,7 @@ class ConfigWidget(QWidget):
         
         # 5. Save General Settings
         prefs['timeout'] = self.timeout_spin.value()
+        prefs['batch_delay'] = self.delay_spin.value()
 
         # 6. Save enabled fields
         prefs['enabled_fields'] = [key for key, _ in ALL_FIELDS if self.field_checkboxes[key].isChecked()]
@@ -484,8 +490,10 @@ class AIVisionAction(InterfaceAction):
             if not confirmed:
                 return
             self.batch_auto_apply = True
+            self._batch_log = []  # [{'title', 'fields', 'status', 'error'}]
         else:
             self.batch_auto_apply = False
+            self._batch_log = []
 
         # Start the assembly line
         self.process_next_in_queue()
@@ -493,10 +501,17 @@ class AIVisionAction(InterfaceAction):
     def process_next_in_queue(self):
         """Pops the next book from the queue and starts the AI job."""
         if not hasattr(self, 'batch_queue') or not self.batch_queue:
-            # The queue is empty, the batch is done!
+            if getattr(self, 'batch_auto_apply', False) and getattr(self, '_batch_log', []):
+                self._show_batch_summary()
             return
 
-        # Pop the first ID off the front of the list
+        # Apply inter-request delay for batch runs (skip for the very first book)
+        if getattr(self, 'batch_auto_apply', False) and hasattr(self, '_batch_log'):
+            delay = int(prefs.get('batch_delay', 2))
+            if delay > 0:
+                import time
+                time.sleep(delay)
+
         book_id = self.batch_queue.pop(0)
         db = self.gui.current_db.new_api
 
@@ -722,7 +737,7 @@ class AIVisionAction(InterfaceAction):
                         del metadata['creators']  # all names rejected → omit field
                 # ---------------------------------------------------
 
-                # --- Google Books verification ---
+                # --- Google Books verification and enrichment ---
                 if metadata.get('title'):
                     gb_api_key = prefs.get('api_key_google', prefs.get('api_key', '')) or None
                     verification = verify_with_google_books(
@@ -731,18 +746,35 @@ class AIVisionAction(InterfaceAction):
                         api_key=gb_api_key
                     )
                     corrections = verification.get('corrections', {})
-                    # Apply title correction if one was found
+                    # Apply title correction
                     title_fix = corrections.get('title')
                     if title_fix and title_fix.get('to'):
                         metadata['title'] = title_fix['to']
-                    # Apply author correction if one was found
+                    # Apply author correction
                     author_fix = corrections.get('authors')
                     if author_fix and author_fix.get('to'):
                         corrected = clean_author_name(author_fix['to'])
                         if corrected:
                             metadata['creators'] = [corrected]
+                    # Apply enrichment: ISBN always; publisher/pubdate/language only if absent
+                    enrichment = verification.get('enrichment', {})
+                    enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
+                    if 'identifiers' in enabled_fields and enrichment.get('isbn'):
+                        metadata['identifiers'] = f"isbn:{enrichment['isbn']}"
+                    if 'publisher' in enabled_fields and enrichment.get('publisher') and not metadata.get('publisher'):
+                        metadata['publisher'] = enrichment['publisher']
+                    if 'pubdate' in enabled_fields and enrichment.get('pubdate') and not metadata.get('pub_year'):
+                        # publishedDate may be "YYYY", "YYYY-MM", or "YYYY-MM-DD"
+                        parts = enrichment['pubdate'].split('-')
+                        metadata['pub_year'] = parts[0]
+                        if len(parts) >= 2:
+                            metadata['pub_month'] = parts[1]
+                        if len(parts) >= 3:
+                            metadata['pub_day'] = parts[2]
+                    if 'languages' in enabled_fields and enrichment.get('language') and not metadata.get('languages'):
+                        metadata['languages'] = [enrichment['language']]
                     metadata['_verification'] = verification
-                # ---------------------------------------------------
+                # -------------------------------------------------
 
                 # --- Inject dynamic provider, model, and duration ---
                 elapsed = time.time() - start_time
@@ -754,37 +786,6 @@ class AIVisionAction(InterfaceAction):
             except json.JSONDecodeError as e:
                 return {"error_msg": _("Data Parsing Error: Could not read AI output.\nRaw Output: {0}...").format(raw_text[:150])}
 
-            # --- ROMAN NUMERAL CONVERTER ---
-            import re
-            def convert_roman_to_arabic(val):
-                if not val or not isinstance(val, str): return val
-                val = val.strip().upper()
-                # Check if the string is strictly a valid Roman numeral
-                if not re.match(r'^M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$', val) or val == '':
-                    return val 
-                
-                roman_map = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
-                res = 0
-                for i in range(len(val)):
-                    if i > 0 and roman_map[val[i]] > roman_map[val[i - 1]]:
-                        res += roman_map[val[i]] - 2 * roman_map[val[i - 1]]
-                    else:
-                        res += roman_map[val[i]]
-                return str(res)
-                
-            # Safely apply the converter to both fields
-            if 'volume' in metadata:
-                metadata['volume'] = convert_roman_to_arabic(str(metadata['volume']))
-            if 'issue_number' in metadata:
-                metadata['issue_number'] = convert_roman_to_arabic(str(metadata['issue_number']))
-            # -------------------------------
-            
-            try:
-                dt = datetime.date(int(metadata['pub_year']), int(metadata['pub_month']), int(metadata['pub_day']))
-                metadata['day_of_year'] = str(dt.timetuple().tm_yday)
-            except:
-                metadata['day_of_year'] = "1"
-                
             # --- Return the cover_path along with the ID and metadata ---
             return (book_id, metadata, cover_path)
             # ------------------------------------------------------------
@@ -813,12 +814,16 @@ class AIVisionAction(InterfaceAction):
             enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
 
             if getattr(self, 'batch_auto_apply', False):
-                # Batch mode: build approved_data from raw metadata and apply directly
                 approved_data = self._build_approved_data(metadata, enabled_fields)
                 if approved_data:
                     self.apply_metadata(book_id, approved_data)
+                self._batch_log.append({
+                    'title': metadata.get('title', _('Book ID {0}').format(book_id)),
+                    'fields': list(approved_data.keys()) if approved_data else [],
+                    'status': 'applied' if approved_data else 'skipped',
+                    'verification': metadata.get('_verification', {}).get('status', ''),
+                })
             else:
-                # Single-book mode: show the interactive review dialog
                 from calibre_plugins.ai_vision_metadata.ui import MetadataReviewDialog
                 d = MetadataReviewDialog(self.gui, metadata, cover_path, enabled_fields)
                 result = d.exec_()
@@ -829,18 +834,30 @@ class AIVisionAction(InterfaceAction):
                     self.apply_metadata(book_id, approved_data)
 
         except Exception as e:
-            from calibre.gui2 import error_dialog
-            error_dialog(self.gui, _('UI Error'), _('Could not process book: {0}').format(str(e)), show=True)
+            if getattr(self, 'batch_auto_apply', False):
+                self._batch_log.append({'title': _('Book ID {0}').format(book_id), 'fields': [], 'status': 'error', 'error': str(e)})
+            else:
+                from calibre.gui2 import error_dialog
+                error_dialog(self.gui, _('UI Error'), _('Could not process book: {0}').format(str(e)), show=True)
 
         finally:
-            # --- Trigger the next book in the queue when the window closes ---
             self.process_next_in_queue()
-            # -----------------------------------------------------------------
 
     def _show_error_dialog(self, error_msg):
-        """Safely displays error messages on the main GUI thread."""
-        from calibre.gui2 import error_dialog
-        error_dialog(self.gui, _("AI Vision Error"), error_msg, show=True)
+        """Displays error messages. In batch mode, logs silently instead of blocking."""
+        if getattr(self, 'batch_auto_apply', False):
+            self._batch_log.append({'title': _('Unknown'), 'fields': [], 'status': 'error', 'error': error_msg})
+            self.process_next_in_queue()
+        else:
+            from calibre.gui2 import error_dialog
+            error_dialog(self.gui, _("AI Vision Error"), error_msg, show=True)
+
+    def _show_batch_summary(self):
+        from calibre_plugins.ai_vision_metadata.ui import BatchSummaryDialog
+        d = BatchSummaryDialog(self.gui, self._batch_log)
+        d.exec_()
+        d.setParent(None)
+        d.deleteLater()
 
     def apply_metadata(self, book_id, approved_data):
         db = self.gui.current_db.new_api
@@ -887,17 +904,13 @@ class AIVisionAction(InterfaceAction):
                 pass
 
         if 'tags' in approved_data:
-            # Convert the comma-separated string from the UI into a clean list
             new_tags = [t.strip() for t in approved_data['tags'].split(',') if t.strip()]
-            
-            # Fetch existing tags from Calibre (returns None if empty)
             existing_tags = mi.tags if mi.tags else []
-            
-            # Append new tags only if they don't already exist in the book's metadata
+            existing_lower = {t.lower() for t in existing_tags}
             for tag in new_tags:
-                if tag not in existing_tags:
+                if tag.lower() not in existing_lower:
                     existing_tags.append(tag)
-                    
+                    existing_lower.add(tag.lower())
             mi.tags = existing_tags
 
         # --- 2. Identifiers (Merge Dictionaries) ---
@@ -916,17 +929,15 @@ class AIVisionAction(InterfaceAction):
             
             mi.identifiers = existing_ids
 
-        # --- 3. Comments (Append Text) ---
+        # --- 3. Comments (Append Text, no duplicates) ---
         if 'comments' in approved_data:
             new_comments = approved_data['comments']
             existing_comments = mi.comments if mi.comments else ""
-            
-            # If there is already text in the comments field, add a line break first
-            if existing_comments.strip():
-                # Using HTML breaks so it renders cleanly in Calibre's book details pane
-                mi.comments = f"{existing_comments}<br><br><b>AI Summary:</b><br>{new_comments}"
-            else:
-                mi.comments = new_comments
+            if new_comments and new_comments not in existing_comments:
+                if existing_comments.strip():
+                    mi.comments = f"{existing_comments}<br><br><b>AI Summary:</b><br>{new_comments}"
+                else:
+                    mi.comments = new_comments
                 
         # --- 4. Pass the metadata to Calibre's new_api cache ---
         db.set_metadata(book_id, mi)

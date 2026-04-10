@@ -160,32 +160,6 @@ def clean_author_name(name):
 # Google Books verification
 # ---------------------------------------------------------------------------
 
-def _normalize_title(text):
-    """Lowercase, strip punctuation, collapse whitespace, drop common articles."""
-    text = text.lower()
-    text = re.sub(r"[^\w\s]", '', text)
-    text = re.sub(r'\b(a|an|the)\b', '', text)
-    return re.sub(r'\s+', ' ', text).strip()
-
-
-def _significant_tokens(name):
-    """Return lowercase bare tokens longer than 1 char (filters lone initials)."""
-    return {t.replace('.', '').lower() for t in name.split()
-            if len(t.replace('.', '')) > 1 and t.replace('.', '').isalpha()}
-
-
-def _fuzzy_token_match(ai_tokens, canonical_name, threshold=0.82):
-    """Return True if every ai_token fuzzy-matches at least one token in canonical_name."""
-    canonical_tokens = _significant_tokens(canonical_name)
-    if not canonical_tokens:
-        return False
-    for ai_tok in ai_tokens:
-        best = max(SequenceMatcher(None, ai_tok, c).ratio() for c in canonical_tokens)
-        if best < threshold:
-            return False
-    return True
-
-
 def _default_fetch(url):
     req = urllib.request.Request(url, headers={'User-Agent': 'CalibreAIVisionPlugin/1.0'})
     with urllib.request.urlopen(req, timeout=10) as r:
@@ -195,104 +169,100 @@ def _default_fetch(url):
 def verify_with_google_books(title, creators, api_key=None, _fetch_fn=None):
     """Query Google Books to verify and correct the title/author combination.
 
-    Google's own search handles OCR typos and fuzzy matching, so we trust its
-    top result rather than trying to re-rank candidates ourselves.
-
     Two-pass strategy:
-      Pass 1 — title + author.  The combined query gives Google the best signal.
-      Pass 2 — title only.  Fallback when the author was absent or rejected
-               upstream (e.g. truncated trailing initial "Ian M.").
+      Pass 1 — title + author query.
+      Pass 2 — title only, if pass 1 returned nothing.
 
-    We take Google's top result and validate with a fuzzy title match (>= 0.85).
-
+    Takes Google's top result and validates with a fuzzy title match (>= 0.85).
     _fetch_fn is injectable for testing (default: real HTTP call).
 
-    Returns a dict:
-      {
-        'status':      'verified' | 'corrected' | 'title_only' | 'unverified',
-        'corrections': {
-            'title':   {'from': original, 'to': canonical},
-            'authors': {'from': original_or_None, 'to': canonical},
-        }
-      }
+    Returns {'status': 'verified'|'corrected'|'title_only'|'unverified',
+             'corrections': {'title': {...}, 'authors': {...}}}
     """
     fetch = _fetch_fn if _fetch_fn is not None else _default_fetch
 
-    def build_url(query):
-        url = f'https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=1'
+    def run_query(q):
+        url = f'https://www.googleapis.com/books/v1/volumes?q={q}&maxResults=1'
         if api_key:
             url += f'&key={urllib.parse.quote(api_key)}'
-        return url
-
-    def run_query(q):
         try:
-            return fetch(build_url(q)).get('items', [])
+            return fetch(url).get('items', [])
         except Exception:
-            return None  # None = hard network/parse error
+            return None  # network / parse error
 
-    corrections = {}
+    def done(corrections):
+        return {'status': 'corrected' if corrections else 'verified', 'corrections': corrections}
 
-    # Determine what the AI gave us for the primary creator
-    creator_str = None
-    if creators:
-        raw = creators[0] if isinstance(creators, list) else str(creators)
-        creator_str = raw.strip() or None
+    # Primary creator string (first element, or None)
+    raw = (creators[0] if isinstance(creators, list) else str(creators)).strip() if creators else ''
+    creator_str = raw or None
 
-    # --- Pass 1: title + author ---
-    inauthor = (f'+inauthor:{urllib.parse.quote(creator_str.replace(".", " ").strip())}'
-                if creator_str else '')
+    # Pass 1: title + author; Pass 2: title only
+    inauthor = f'+inauthor:{urllib.parse.quote(creator_str.replace(".", " "))}' if creator_str else ''
     items = run_query(f'intitle:{urllib.parse.quote(title)}{inauthor}')
     if items is None:
         return {'status': 'unverified', 'corrections': {}}
-
-    # --- Pass 2: title only (when pass 1 returned nothing) ---
     if not items:
         items = run_query(f'intitle:{urllib.parse.quote(title)}') or []
-
     if not items:
         return {'status': 'unverified', 'corrections': {}}
 
-    volume_info   = items[0].get('volumeInfo', {})
-    books_title   = volume_info.get('title', '')
+    volume_info = items[0].get('volumeInfo', {})
+    # Strip trailing edition suffixes: "On Wings of Blood (Standard Edition)" → "On Wings of Blood"
+    books_title_raw = volume_info.get('title', '')
+    books_title = re.sub(r'\s*\([^)]*\)\s*$', '', books_title_raw).strip() or books_title_raw
     books_authors = volume_info.get('authors', [])
 
-    # --- Title match check (fuzzy, >= 0.85) ---
-    n_ai    = _normalize_title(title)
-    n_books = _normalize_title(books_title)
-    if n_ai in n_books or n_books in n_ai:
-        ratio = 1.0
-    else:
-        ratio = SequenceMatcher(None, n_ai, n_books).ratio()
-    if ratio < 0.85:
+    # Title must fuzzy-match at >= 0.85 (case-insensitive)
+    if SequenceMatcher(None, title.lower(), books_title.lower()).ratio() < 0.85:
         return {'status': 'unverified', 'corrections': {}}
 
-    # Record title correction when the normalised strings differ
-    if n_ai != n_books:
+    corrections = {}
+    if title.lower() != books_title.lower():
         corrections['title'] = {'from': title, 'to': books_title}
 
-    # --- Author verification / correction ---
-    if not books_authors:
-        return {'status': 'corrected' if corrections else 'verified', 'corrections': corrections}
+    # Collect structured enrichment now that we have a confirmed title match
+    enrichment = {}
+    for id_entry in volume_info.get('industryIdentifiers', []):
+        if id_entry.get('type') == 'ISBN_13':
+            enrichment['isbn'] = id_entry.get('identifier', '')
+            break
+    if 'isbn' not in enrichment:
+        for id_entry in volume_info.get('industryIdentifiers', []):
+            if id_entry.get('type') == 'ISBN_10':
+                enrichment['isbn'] = id_entry.get('identifier', '')
+                break
+    if volume_info.get('publisher'):
+        enrichment['publisher'] = volume_info['publisher']
+    if volume_info.get('publishedDate'):
+        enrichment['pubdate'] = volume_info['publishedDate']
+    if volume_info.get('language'):
+        enrichment['language'] = volume_info['language']
 
-    canonical_raw     = books_authors[0]
+    def done(corrections):
+        result = {'status': 'corrected' if corrections else 'verified', 'corrections': corrections}
+        if enrichment:
+            result['enrichment'] = enrichment
+        return result
+
+    if not books_authors:
+        return done(corrections)
+
+    canonical_raw = books_authors[0]
     canonical_cleaned = clean_author_name(canonical_raw)
 
     if creator_str is None:
-        # AI had no valid author — supply one from Books
         if canonical_cleaned:
             corrections['authors'] = {'from': None, 'to': canonical_cleaned}
-        return {'status': 'corrected' if corrections else 'verified', 'corrections': corrections}
+        return done(corrections)
 
-    # Fuzzy-match the tokens the AI gave us against the canonical name
-    ai_tokens = _significant_tokens(creator_str)
-    if ai_tokens and _fuzzy_token_match(ai_tokens, canonical_raw):
-        # All AI tokens accounted for — use canonical spelling
+    # Author fuzzy-match at >= 0.82 (whole-string, case-insensitive)
+    if SequenceMatcher(None, creator_str.lower(), canonical_raw.lower()).ratio() >= 0.82:
         if canonical_cleaned and canonical_cleaned != creator_str:
             corrections['authors'] = {'from': creator_str, 'to': canonical_cleaned}
-        return {'status': 'corrected' if corrections else 'verified', 'corrections': corrections}
-    else:
-        # AI tokens don't map to the top Books result — title matched but author unclear
-        return {'status': 'title_only', 'corrections': corrections}
+        return done(corrections)
+
+    return {'status': 'title_only', 'corrections': corrections, 'enrichment': enrichment}
 
 # ---------------------------------------------------------------------------
 # Approved-data builder (batch auto-apply path)
@@ -358,7 +328,7 @@ def build_approved_data(metadata, enabled_fields):
             approved['pubdate'] = f'{year}-{month}-{day}'
 
     if 'identifiers' in enabled_fields:
-        val = metadata.get('ids')
+        val = metadata.get('identifiers')
         if val not in _NULL_VALUES:
             approved['identifiers'] = str(val).strip()
 

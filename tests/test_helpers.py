@@ -290,6 +290,61 @@ class TestVerifyWithGoogleBooks:
         assert result['corrections']['title']['to'] == 'On Wings of Blood'
         assert call_count['n'] == 2  # pass 1 empty → pass 2 finds it
 
+    # --- Edition suffix in Google title is stripped before comparison ---
+    def test_edition_suffix_stripped_before_match(self):
+        """Google returns 'On Wings of Blood (Standard Edition)'; the suffix must be
+        stripped before the fuzzy ratio is computed, otherwise ratio ~0.63 fails."""
+        fetch = _make_fetch('On Wings of Blood (Standard Edition)', ['Briar Boleyn'])
+        result = verify_with_google_books(
+            'Of Wings of Blood', ['Briar Boleyn'], _fetch_fn=fetch)
+        assert result['status'] == 'corrected'
+        assert result['corrections']['title']['to'] == 'On Wings of Blood'
+
+    # --- Enrichment data returned on verified/corrected match ---
+    def test_enrichment_isbn13_extracted(self):
+        response = {'items': [{'volumeInfo': {
+            'title': 'Dune', 'authors': ['Frank Herbert'],
+            'industryIdentifiers': [
+                {'type': 'ISBN_13', 'identifier': '9780441013593'},
+                {'type': 'ISBN_10', 'identifier': '0441013597'},
+            ],
+            'publisher': 'Chilton Books',
+            'publishedDate': '1965-08-01',
+            'language': 'en',
+        }}]}
+        result = verify_with_google_books('Dune', ['Frank Herbert'], _fetch_fn=lambda _: response)
+        assert result['status'] == 'verified'
+        assert result['enrichment']['isbn'] == '9780441013593'
+        assert result['enrichment']['publisher'] == 'Chilton Books'
+        assert result['enrichment']['pubdate'] == '1965-08-01'
+        assert result['enrichment']['language'] == 'en'
+
+    def test_enrichment_isbn10_fallback(self):
+        """ISBN-13 absent — falls back to ISBN-10."""
+        response = {'items': [{'volumeInfo': {
+            'title': 'Dune', 'authors': ['Frank Herbert'],
+            'industryIdentifiers': [{'type': 'ISBN_10', 'identifier': '0441013597'}],
+        }}]}
+        result = verify_with_google_books('Dune', ['Frank Herbert'], _fetch_fn=lambda _: response)
+        assert result['enrichment']['isbn'] == '0441013597'
+
+    def test_enrichment_absent_on_unverified(self):
+        """No enrichment when title doesn't match."""
+        fetch = _make_fetch('Something Completely Different', ['Author Name'])
+        result = verify_with_google_books('Dune', ['Frank Herbert'], _fetch_fn=fetch)
+        assert result['status'] == 'unverified'
+        assert 'enrichment' not in result
+
+    def test_enrichment_absent_on_title_only(self):
+        """title_only still returns enrichment (title matched, author didn't)."""
+        response = {'items': [{'volumeInfo': {
+            'title': 'Dune', 'authors': ['Someone Else'],
+            'industryIdentifiers': [{'type': 'ISBN_13', 'identifier': '9780441013593'}],
+        }}]}
+        result = verify_with_google_books('Dune', ['Frank Herbert'], _fetch_fn=lambda _: response)
+        assert result['status'] == 'title_only'
+        assert result['enrichment']['isbn'] == '9780441013593'
+
     # --- Title mismatch → unverified ---
     def test_title_mismatch_unverified(self):
         fetch = _make_fetch('Something Completely Different', ['Author Name'])
@@ -340,7 +395,7 @@ class TestBuildApprovedData:
             'pub_year':    1965,
             'pub_month':   8,
             'pub_day':     1,
-            'ids':         'isbn:9780441013593',
+            'identifiers': 'isbn:9780441013593',
             'comments':    'A masterwork of science fiction.',
         }
 

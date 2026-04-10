@@ -1,6 +1,6 @@
 # __license__   = 'GPL v3'
 # __copyright__ = '2026, RelUnrelated <dan@relunrelated.com>'
-from qt.core import QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame, QLineEdit, QComboBox, QCheckBox, QPushButton, QDialogButtonBox, QTextEdit, QPixmap, Qt
+from qt.core import QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame, QLineEdit, QComboBox, QCheckBox, QPushButton, QDialogButtonBox, QTextEdit, QPixmap, Qt, QTreeWidget, QTreeWidgetItem, QHeaderView
 
 try:
     load_translations()
@@ -222,11 +222,6 @@ class MetadataReviewDialog(QDialog):
                 index_options.append(iss)
             if vol and vol not in index_options:
                 index_options.append(vol)
-            if metadata.get('day_of_year'):
-                doy = str(metadata.get('day_of_year'))
-                if doy not in index_options:
-                    index_options.append(doy)
-
             if 'series' in enabled_fields:
                 add_indented_combo_field('series', _('Series:'), [series_val], _("Replaces"))
             if 'series_index' in enabled_fields:
@@ -257,7 +252,7 @@ class MetadataReviewDialog(QDialog):
             add_field("pubdate", _("Published"), pub_date, _("Replaces"))
 
         if 'identifiers' in enabled_fields:
-            add_field("identifiers", _("Identifiers"), metadata.get('ids', ''), _("Merges"))
+            add_field("identifiers", _("Identifiers"), metadata.get('identifiers', ''), _("Merges"))
 
         if 'comments' in enabled_fields:
             add_text_area("comments", _("Comments"), metadata.get('comments', ''), _("Appends"))
@@ -303,3 +298,66 @@ class MetadataReviewDialog(QDialog):
                 else:
                     approved[key] = widget.text().strip()
         return approved
+
+
+class BatchSummaryDialog(QDialog):
+    """Post-batch summary showing what was applied, skipped, or errored per book."""
+
+    _STATUS_LABELS = {
+        'applied':  'Applied',
+        'skipped':  'Skipped (no data)',
+        'error':    'Error',
+    }
+    _VERIFICATION_LABELS = {
+        'verified':   '✓ Verified',
+        'corrected':  '✎ Corrected',
+        'title_only': '⚠ Title only',
+        'unverified': '– Unverified',
+        '':           '',
+    }
+
+    def __init__(self, parent, batch_log):
+        super().__init__(parent)
+        self.setWindowTitle(_("Batch Processing Summary"))
+        self.setMinimumWidth(700)
+        self.setMinimumHeight(400)
+
+        layout = QVBoxLayout(self)
+
+        applied = sum(1 for e in batch_log if e['status'] == 'applied')
+        skipped = sum(1 for e in batch_log if e['status'] == 'skipped')
+        errors  = sum(1 for e in batch_log if e['status'] == 'error')
+
+        summary = QLabel(_(
+            "<b>Processed {total} books:</b> {applied} applied, {skipped} skipped, {errors} errors."
+        ).format(total=len(batch_log), applied=applied, skipped=skipped, errors=errors))
+        summary.setContentsMargins(0, 0, 0, 8)
+        layout.addWidget(summary)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels([_("Book"), _("Status"), _("Google Books")])
+        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        tree.setRootIsDecorated(True)
+
+        for entry in batch_log:
+            status_label = self._STATUS_LABELS.get(entry['status'], entry['status'])
+            verification_label = self._VERIFICATION_LABELS.get(entry.get('verification', ''), '')
+            row = QTreeWidgetItem([entry['title'], status_label, verification_label])
+
+            if entry['status'] == 'error':
+                child = QTreeWidgetItem([entry.get('error', ''), '', ''])
+                row.addChild(child)
+            elif entry.get('fields'):
+                child = QTreeWidgetItem([', '.join(entry['fields']), '', ''])
+                row.addChild(child)
+
+            tree.addTopLevelItem(row)
+
+        layout.addWidget(tree)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
