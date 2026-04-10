@@ -60,6 +60,105 @@ ALL_FIELDS = [
 ]
 ALL_FIELD_KEYS = [k for k, _ in ALL_FIELDS]
 
+# ---------------------------------------------------------------------------
+# Post-processing helpers — applied to AI output before it reaches the UI
+# ---------------------------------------------------------------------------
+
+def _clean_title(title):
+    """Correct title capitalisation only when the AI returned ALL CAPS or all lowercase.
+    Leaves already-mixed titles (correct or intentional) untouched.
+    Applies standard title-case rules: articles/prepositions stay lowercase unless
+    they are the first or last word.
+    """
+    LOWERCASE_WORDS = frozenset({
+        'a', 'an', 'the', 'and', 'but', 'or', 'nor', 'for', 'yet', 'so',
+        'at', 'by', 'in', 'of', 'on', 'to', 'up', 'as', 'vs', 'via',
+    })
+    alpha_chars = [c for c in title if c.isalpha()]
+    if not alpha_chars:
+        return title
+    # Only intervene when every alpha character is the same case
+    if not (all(c.isupper() for c in alpha_chars) or all(c.islower() for c in alpha_chars)):
+        return title
+    words = title.split()
+    result = []
+    for i, word in enumerate(words):
+        bare_lower = word.lower().strip('.,;:!?"\'-()[]{}')
+        if i == 0 or i == len(words) - 1 or bare_lower not in LOWERCASE_WORDS:
+            result.append(word.capitalize())
+        else:
+            result.append(word.lower())
+    return ' '.join(result)
+
+
+def _clean_author_name(name):
+    """Normalise a single author name string.
+
+    Rules applied in order:
+    1. "Lastname, Firstname" → "Firstname Lastname"
+    2. Reject any name whose *last* token is a lone initial (e.g. "John S." → None)
+    3. Format initials:
+         "J"     → "J."
+         "JK"    → "J.K."   (2 adjacent all-caps letters)
+         "J.K."  → "J.K."   (already dotted, re-normalised for consistency)
+         "J.R.R."→ "J.R.R."
+    4. ALL-CAPS name tokens → Title Case  ("ROWLING" → "Rowling")
+    5. Mixed-case tokens left untouched.
+
+    Returns None if the name is rejected.
+    """
+    name = name.strip()
+    if not name:
+        return None
+
+    # Rule 1: "Lastname, Firstname" → "Firstname Lastname"
+    if ',' in name:
+        parts = name.split(',', 1)
+        name = parts[1].strip() + ' ' + parts[0].strip()
+
+    tokens = name.split()
+    if not tokens:
+        return None
+
+    # Rule 2: reject trailing initial
+    last_bare = tokens[-1].replace('.', '').strip()
+    if len(last_bare) == 1 and last_bare.isalpha():
+        return None
+
+    normalized = []
+    for token in tokens:
+        bare = token.replace('.', '').strip()
+        if not bare or not bare.isalpha():
+            normalized.append(token)
+            continue
+
+        # Already dot-formatted initials (e.g. "J.K.", "J.R.R.") → re-normalise
+        if '.' in token and bare.isupper() and len(bare) <= 4:
+            normalized.append('.'.join(bare) + '.')
+            continue
+
+        # Single letter → "J."
+        if len(bare) == 1:
+            normalized.append(bare.upper() + '.')
+            continue
+
+        # Two adjacent all-caps letters → "J.K."
+        if len(bare) == 2 and bare.isupper():
+            normalized.append(bare[0] + '.' + bare[1] + '.')
+            continue
+
+        # Remaining all-caps word → Title Case
+        if bare.isupper():
+            normalized.append(bare.capitalize())
+            continue
+
+        # Mixed or already-correct casing → leave alone
+        normalized.append(token)
+
+    return ' '.join(normalized)
+
+# ---------------------------------------------------------------------------
+
 class ConfigWidget(QWidget):
     def __init__(self):
         QWidget.__init__(self)
@@ -719,6 +818,23 @@ class AIVisionAction(InterfaceAction):
                         return len(v) == 0
                     return v in (None, 'null', 'None', '')
                 metadata = {k: v for k, v in metadata.items() if not _is_null(v)}
+                # ---------------------------------------------------
+
+                # --- Clean up title capitalisation ---
+                if isinstance(metadata.get('title'), str):
+                    metadata['title'] = _clean_title(metadata['title'])
+                # ---------------------------------------------------
+
+                # --- Clean up author names ---
+                raw_creators = metadata.get('creators')
+                if raw_creators is not None:
+                    names_in = raw_creators if isinstance(raw_creators, list) else [str(raw_creators)]
+                    names_out = [_clean_author_name(n) for n in names_in if isinstance(n, str)]
+                    names_out = [n for n in names_out if n]  # drop rejected names
+                    if names_out:
+                        metadata['creators'] = names_out
+                    else:
+                        del metadata['creators']  # all names rejected → omit field
                 # ---------------------------------------------------
 
                 # --- Inject dynamic provider, model, and duration ---
