@@ -206,7 +206,7 @@ class MetadataReviewDialog(QDialog):
                 elif rogue_author: raw_creators = [rogue_author]
                 else: raw_creators = []
             creators_str = ", ".join(raw_creators) if isinstance(raw_creators, list) else str(raw_creators)
-            add_field("authors", _("Creators"), creators_str, _("Replaces"))
+            add_field("authors", _("Authors"), creators_str, _("Replaces"))
 
         if 'series' in enabled_fields or 'series_index' in enabled_fields:
             series_val = str(metadata.get('series', '')).strip()

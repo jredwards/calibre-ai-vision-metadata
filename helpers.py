@@ -21,15 +21,32 @@ from difflib import SequenceMatcher
 # This drives both the config checkboxes and the review dialog.
 ALL_FIELDS = [
     ('title',        'Title'),
-    ('authors',      'Creator(s)'),
-    ('series',       'Series'),
-    ('series_index', 'Series Index'),
-    ('tags',         'Tags'),
+    ('authors',      'Author(s)'),
     ('languages',    'Languages'),
     ('publisher',    'Publisher'),
     ('pubdate',      'Published Date'),
     ('identifiers',  'Identifiers'),
+    ('series',       'Series'),
+    ('series_index', 'Series Index'),
+    ('tags',         'Tags'),
     ('comments',     'Comments'),
+]
+
+# Groups shown in the configuration page, ordered by data source.
+# Each entry: (section_label, [field_keys])
+FIELD_GROUPS = [
+    (
+        'From AI scan (read from cover image)',
+        ['title', 'authors', 'languages'],
+    ),
+    (
+        'From Google Books (populated when book is verified)',
+        ['publisher', 'pubdate', 'identifiers'],
+    ),
+    (
+        'Manual entry only — not auto-populated by either source',
+        ['series', 'series_index', 'tags', 'comments'],
+    ),
 ]
 ALL_FIELD_KEYS = [k for k, _ in ALL_FIELDS]
 

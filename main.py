@@ -14,7 +14,7 @@ from calibre.gui2.actions import InterfaceAction
 from calibre.gui2.threaded_jobs import ThreadedJob
 from calibre_plugins.ai_vision_metadata.config import prefs
 from calibre_plugins.ai_vision_metadata.helpers import (
-    ALL_FIELDS, ALL_FIELD_KEYS,
+    ALL_FIELDS, ALL_FIELD_KEYS, FIELD_GROUPS,
     is_null_value, strip_null_values,
     clean_title, clean_author_name,
     verify_with_google_books,
@@ -31,21 +31,16 @@ class WorkerSignals(QObject):
     error_signal = pyqtSignal(str)  
 
 DEFAULT_PROMPT = (
-    "Analyze this book cover. Your PRIMARY task is to read and extract information "
-    "visibly printed on this specific cover. "
-    "Return ONLY a JSON object with the following keys: "
-    "'title' (string: the full book title as printed on the cover), "
-    "'creators' (list of strings: authors, editors, or illustrators as printed on the cover, in the order they appear), "
-    "'series' (string: the series name if this book is part of a series, otherwise null), "
-    "'series_index' (string: the volume or book number within the series if printed, otherwise null), "
-    "'publisher' (string: the publishing company if visible on the cover, otherwise null), "
-    "'pub_year' (integer: the publication year if visible, otherwise null), "
-    "'languages' (list of strings: 3-letter ISO 639-2 language codes based on the language of the text on the cover, e.g. ['eng']), "
-    "'tags' (list of strings: genre or subject tags inferred from the cover art, title, and any visible text), "
-    "'comments' (string: a 1-to-2 sentence description of the book based solely on what is visible on the cover — do not speculate or infer content beyond what is shown). "
-    "Do NOT use web search to supplement missing fields. "
+    "Analyze this book cover image. "
+    "Return ONLY a JSON object with exactly these three keys: "
+    "'title' (string: the full book title exactly as printed on the cover), "
+    "'creators' (list of strings: every author, editor, or illustrator name printed on the cover, "
+    "in the order they appear — return an empty list if none are visible), "
+    "'languages' (list of strings: 3-letter ISO 639-2 language codes for the language of the text "
+    "on the cover, e.g. ['eng'] for English, ['fra'] for French). "
+    "Do not include any other keys. "
     "If a field cannot be determined from the cover, return null for that field. "
-    "Do not guess or infer values that are not visibly printed."
+    "Do not guess, infer, or use web search."
 )
 
 class ConfigWidget(QWidget):
@@ -170,22 +165,34 @@ class ConfigWidget(QWidget):
         self.l.addWidget(self.key_google_books)
 
         # --- 6. Default Fields to Update ---
-        self.label_fields = QLabel(_('Default Fields to Update:'))
-        self.l.addWidget(self.label_fields)
-
-        self.fields_grid_widget = QWidget()
-        self.fields_grid = QGridLayout(self.fields_grid_widget)
-        self.fields_grid.setContentsMargins(0, 0, 0, 0)
+        self.l.addWidget(QLabel(_('<b>Fields to Update</b>')))
+        self.l.addWidget(QLabel(_(
+            '<i>Fields are grouped by their data source. Uncheck any field to prevent the '
+            'plugin from ever writing to it. "Manual entry only" fields never auto-populate — '
+            'they appear in the single-book review dialog for optional manual input.</i>'
+        )))
 
         enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
         self.field_checkboxes = {}
-        for i, (key, label) in enumerate(ALL_FIELDS):
-            chk = QCheckBox(_(label))
-            chk.setChecked(key in enabled_fields)
-            self.fields_grid.addWidget(chk, i // 2, i % 2)
-            self.field_checkboxes[key] = chk
+        field_labels = dict(ALL_FIELDS)
 
-        self.l.addWidget(self.fields_grid_widget)
+        for group_label, keys in FIELD_GROUPS:
+            header = QLabel(_(f'<b>{group_label}:</b>'))
+            header.setContentsMargins(0, 8, 0, 2)
+            self.l.addWidget(header)
+
+            group_widget = QWidget()
+            group_grid = QGridLayout(group_widget)
+            group_grid.setContentsMargins(12, 0, 0, 0)
+            group_grid.setHorizontalSpacing(20)
+
+            for i, key in enumerate(keys):
+                chk = QCheckBox(_(field_labels[key]))
+                chk.setChecked(key in enabled_fields)
+                group_grid.addWidget(chk, i // 3, i % 3)
+                self.field_checkboxes[key] = chk
+
+            self.l.addWidget(group_widget)
 
         # --- 7. Prompt Tuning Area (Dedicated Memory Banks) ---
         self.prompt_layout = QHBoxLayout()
