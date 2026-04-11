@@ -357,6 +357,15 @@ class TestVerifyWithGoogleBooks:
         assert result['status'] == 'unverified'
 
     # --- Network error → unverified (graceful) ---
+    def test_rate_limit_returns_rate_limited_status(self):
+        """HTTP 429 from either pass must return 'rate_limited', not 'unverified'."""
+        import urllib.error
+        def fetch_429(url):
+            raise urllib.error.HTTPError(url, 429, 'Too Many Requests', {}, None)
+        result = verify_with_google_books('Dune', ['Frank Herbert'], _fetch_fn=fetch_429)
+        assert result['status'] == 'rate_limited'
+        assert result['corrections'] == {}
+
     def test_network_error_graceful(self):
         result = verify_with_google_books('Dune', ['Frank Herbert'], _fetch_fn=_error_fetch)
         assert result['status'] == 'unverified'

@@ -160,6 +160,15 @@ class ConfigWidget(QWidget):
         self.delay_spin.setValue(int(prefs.get('batch_delay', 2)))
         self.l.addWidget(self.delay_spin)
 
+        self.label_books_key = QLabel(_(
+            'Google Books API Key (optional — raises rate limit; leave blank to use unauthenticated):'))
+        self.l.addWidget(self.label_books_key)
+
+        self.key_google_books = QLineEdit(self)
+        self.key_google_books.setPlaceholderText(_('Leave blank for unauthenticated access'))
+        self.key_google_books.setText(prefs.get('api_key_google_books', ''))
+        self.l.addWidget(self.key_google_books)
+
         # --- 6. Default Fields to Update ---
         self.label_fields = QLabel(_('Default Fields to Update:'))
         self.l.addWidget(self.label_fields)
@@ -388,6 +397,7 @@ class ConfigWidget(QWidget):
         # 5. Save General Settings
         prefs['timeout'] = self.timeout_spin.value()
         prefs['batch_delay'] = self.delay_spin.value()
+        prefs['api_key_google_books'] = self.key_google_books.text().strip()
 
         # 6. Save enabled fields
         prefs['enabled_fields'] = [key for key, _ in ALL_FIELDS if self.field_checkboxes[key].isChecked()]
@@ -739,7 +749,7 @@ class AIVisionAction(InterfaceAction):
 
                 # --- Google Books verification and enrichment ---
                 if metadata.get('title'):
-                    gb_api_key = prefs.get('api_key_google', prefs.get('api_key', '')) or None
+                    gb_api_key = prefs.get('api_key_google_books', '') or None
                     verification = verify_with_google_books(
                         metadata['title'],
                         metadata.get('creators'),

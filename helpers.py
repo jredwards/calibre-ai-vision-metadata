@@ -7,8 +7,10 @@ Imported by main.py at runtime and by the test suite without a Calibre environme
 
 import re
 import json
+import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from difflib import SequenceMatcher
 
 # ---------------------------------------------------------------------------
@@ -160,10 +162,18 @@ def clean_author_name(name):
 # Google Books verification
 # ---------------------------------------------------------------------------
 
-def _default_fetch(url):
+def _default_fetch(url, _retries=3, _backoff=1):
+    """Fetch a URL, retrying on 429 with exponential backoff."""
     req = urllib.request.Request(url, headers={'User-Agent': 'CalibreAIVisionPlugin/1.0'})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read().decode('utf-8'))
+    for attempt in range(_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < _retries - 1:
+                time.sleep(_backoff * (2 ** attempt))  # 1s, 2s
+                continue
+            raise
 
 
 def verify_with_google_books(title, creators, api_key=None, _fetch_fn=None):
@@ -181,14 +191,20 @@ def verify_with_google_books(title, creators, api_key=None, _fetch_fn=None):
     """
     fetch = _fetch_fn if _fetch_fn is not None else _default_fetch
 
+    _RATE_LIMITED = object()  # sentinel distinct from None (other error) and [] (no results)
+
     def run_query(q):
         url = f'https://www.googleapis.com/books/v1/volumes?q={q}&maxResults=1'
         if api_key:
             url += f'&key={urllib.parse.quote(api_key)}'
         try:
             return fetch(url).get('items', [])
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                return _RATE_LIMITED
+            return None
         except Exception:
-            return None  # network / parse error
+            return None
 
     def done(corrections):
         return {'status': 'corrected' if corrections else 'verified', 'corrections': corrections}
@@ -200,10 +216,14 @@ def verify_with_google_books(title, creators, api_key=None, _fetch_fn=None):
     # Pass 1: title + author; Pass 2: title only
     inauthor = f'+inauthor:{urllib.parse.quote(creator_str.replace(".", " "))}' if creator_str else ''
     items = run_query(f'intitle:{urllib.parse.quote(title)}{inauthor}')
+    if items is _RATE_LIMITED:
+        return {'status': 'rate_limited', 'corrections': {}}
     if items is None:
         return {'status': 'unverified', 'corrections': {}}
     if not items:
         items = run_query(f'intitle:{urllib.parse.quote(title)}') or []
+        if items is _RATE_LIMITED:
+            return {'status': 'rate_limited', 'corrections': {}}
     if not items:
         return {'status': 'unverified', 'corrections': {}}
 

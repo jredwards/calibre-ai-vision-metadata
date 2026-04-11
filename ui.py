@@ -73,6 +73,9 @@ class MetadataReviewDialog(QDialog):
                 badge_text  = _('\u26a0 Title matched on Google Books but author could not be verified')
                 if lines:
                     badge_text += '<br>' + '<br>'.join(lines)
+            elif status == 'rate_limited':
+                badge_color = '#c62828'   # red
+                badge_text  = _('\u29d7 Google Books rate limit reached — verification skipped')
             else:
                 badge_color = '#757575'   # grey
                 badge_text  = _('\u2013 Could not verify against Google Books')
@@ -309,11 +312,12 @@ class BatchSummaryDialog(QDialog):
         'error':    'Error',
     }
     _VERIFICATION_LABELS = {
-        'verified':   '✓ Verified',
-        'corrected':  '✎ Corrected',
-        'title_only': '⚠ Title only',
-        'unverified': '– Unverified',
-        '':           '',
+        'verified':     '✓ Verified',
+        'corrected':    '✎ Corrected',
+        'title_only':   '⚠ Title only',
+        'unverified':   '– Unverified',
+        'rate_limited': '⊗ Rate limited',
+        '':             '',
     }
 
     def __init__(self, parent, batch_log):
