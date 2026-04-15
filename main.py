@@ -32,10 +32,11 @@ class WorkerSignals(QObject):
 
 DEFAULT_PROMPT = (
     "Analyze this book cover image. "
-    "Return ONLY a JSON object with exactly these three keys: "
+    "Return ONLY a JSON object with exactly these four keys: "
     "'title' (string: the full book title exactly as printed on the cover), "
     "'creators' (list of strings: every author, editor, or illustrator name printed on the cover, "
     "in the order they appear — return an empty list if none are visible), "
+    "'publisher' (string: the publisher name if clearly printed on the cover, otherwise null), "
     "'languages' (list of strings: 3-letter ISO 639-2 language codes for the language of the text "
     "on the cover, e.g. ['eng'] for English, ['fra'] for French). "
     "Do not include any other keys. "
@@ -737,6 +738,11 @@ class AIVisionAction(InterfaceAction):
                 metadata = strip_null_values(metadata)
                 # ---------------------------------------------------
 
+                # --- Normalise languages to a list (AI sometimes returns a bare string) ---
+                if isinstance(metadata.get('languages'), str):
+                    metadata['languages'] = [metadata['languages']]
+                # ---------------------------------------------------------------------------
+
                 # --- Clean up title capitalisation ---
                 if isinstance(metadata.get('title'), str):
                     metadata['title'] = clean_title(metadata['title'])
@@ -763,6 +769,7 @@ class AIVisionAction(InterfaceAction):
                         api_key=gb_api_key
                     )
                     corrections = verification.get('corrections', {})
+                    v_status = verification.get('status', 'unverified')
                     # Apply title correction
                     title_fix = corrections.get('title')
                     if title_fix and title_fix.get('to'):
@@ -776,10 +783,15 @@ class AIVisionAction(InterfaceAction):
                     # Apply enrichment: ISBN always; publisher/pubdate/language only if absent
                     enrichment = verification.get('enrichment', {})
                     enabled_fields = prefs.get('enabled_fields', ALL_FIELD_KEYS)
+                    had_publisher = bool(metadata.get('publisher'))
+                    had_languages = bool(metadata.get('languages'))
+                    provenance = {}
                     if 'identifiers' in enabled_fields and enrichment.get('isbn'):
                         metadata['identifiers'] = f"isbn:{enrichment['isbn']}"
-                    if 'publisher' in enabled_fields and enrichment.get('publisher') and not metadata.get('publisher'):
+                        provenance['identifiers'] = {'ai': None, 'gb': metadata['identifiers']}
+                    if 'publisher' in enabled_fields and enrichment.get('publisher') and not had_publisher:
                         metadata['publisher'] = enrichment['publisher']
+                        provenance['publisher'] = {'ai': None, 'gb': metadata['publisher']}
                     if 'pubdate' in enabled_fields and enrichment.get('pubdate') and not metadata.get('pub_year'):
                         # publishedDate may be "YYYY", "YYYY-MM", or "YYYY-MM-DD"
                         parts = enrichment['pubdate'].split('-')
@@ -788,8 +800,36 @@ class AIVisionAction(InterfaceAction):
                             metadata['pub_month'] = parts[1]
                         if len(parts) >= 3:
                             metadata['pub_day'] = parts[2]
-                    if 'languages' in enabled_fields and enrichment.get('language') and not metadata.get('languages'):
+                        provenance['pubdate'] = {'ai': None, 'gb': enrichment['pubdate']}
+                    if 'languages' in enabled_fields and enrichment.get('language') and not had_languages:
                         metadata['languages'] = [enrichment['language']]
+                        provenance['languages'] = {'ai': None, 'gb': enrichment['language']}
+                    # Track AI field provenance: {'ai': raw_value, 'gb': corrected_value}
+                    # or {'ai': raw_value, 'gb_status': verification_status}
+                    # Note: 'title_only' means the title DID match — only the author didn't.
+                    title_gb_status = 'verified' if v_status in ('verified', 'corrected', 'title_only') else v_status
+                    if 'title' in metadata:
+                        if title_fix:
+                            provenance['title'] = {'ai': title_fix['from'], 'gb': metadata['title']}
+                        else:
+                            provenance['title'] = {'ai': metadata['title'], 'gb_status': title_gb_status}
+                    if 'creators' in metadata:
+                        creators_display = ', '.join(metadata['creators'])
+                        if author_fix and author_fix.get('from') is None:
+                            provenance['authors'] = {'ai': None, 'gb': creators_display}
+                        elif author_fix:
+                            provenance['authors'] = {'ai': author_fix['from'], 'gb': creators_display}
+                        else:
+                            # 'corrected' means a *title* correction — the author still matched
+                            authors_gb_status = ('verified' if v_status in ('verified', 'corrected')
+                                                 else v_status)
+                            provenance['authors'] = {'ai': creators_display, 'gb_status': authors_gb_status}
+                    if had_publisher and 'publisher' not in provenance:
+                        provenance['publisher'] = {'ai': metadata['publisher'], 'gb_status': title_gb_status}
+                    if 'languages' in metadata and 'languages' not in provenance:
+                        langs_display = ', '.join(metadata['languages'])
+                        provenance['languages'] = {'ai': langs_display, 'gb_status': title_gb_status}
+                    metadata['_provenance'] = provenance
                     metadata['_verification'] = verification
                 # -------------------------------------------------
 
@@ -832,17 +872,65 @@ class AIVisionAction(InterfaceAction):
 
             if getattr(self, 'batch_auto_apply', False):
                 approved_data = self._build_approved_data(metadata, enabled_fields)
+                # Fetch original Calibre values before overwriting them
+                db = self.gui.current_db.new_api
+                mi = db.get_metadata(book_id)
+                _original = {
+                    'title':       mi.title or '',
+                    'authors':     ', '.join(mi.authors) if mi.authors else '',
+                    'languages':   ', '.join(mi.languages) if mi.languages else '',
+                    'publisher':   mi.publisher or '',
+                    'pubdate':     (mi.pubdate.strftime('%Y-%m-%d')
+                                   if mi.pubdate and getattr(mi.pubdate, 'year', 9999) < 9000 else ''),
+                    'identifiers': ', '.join(f"{k}:{v}" for k, v in (mi.identifiers or {}).items()),
+                }
                 if approved_data:
                     self.apply_metadata(book_id, approved_data)
+                provenance = metadata.get('_provenance', {})
+                field_data = []
+                if approved_data:
+                    for field_key, value in approved_data.items():
+                        field_label = dict(ALL_FIELDS).get(field_key, field_key)
+                        p = provenance.get(field_key, {})
+                        ai_str = str(p['ai']) if p.get('ai') else '\u2013'
+                        gb      = p.get('gb')
+                        gb_stat = p.get('gb_status', '')
+                        if p.get('ai') is None and gb:
+                            gb_state = 'enriched'
+                            gb_str   = str(gb)
+                        elif p.get('ai') and gb:
+                            gb_state = 'corrected'
+                            gb_str   = str(gb)
+                        elif gb_stat in ('verified', 'corrected'):
+                            gb_state = 'verified'
+                            gb_str   = ai_str   # confirmed same value
+                        elif gb_stat in ('title_only', 'unverified'):
+                            gb_state = 'unverified'
+                            gb_str   = _('(unverified)')
+                        elif gb_stat == 'rate_limited':
+                            gb_state = 'rate_limited'
+                            gb_str   = _('(rate limited)')
+                        else:
+                            gb_state = ''
+                            gb_str   = '\u2013'
+                        orig_str = _original.get(field_key, '')
+                        field_data.append({
+                            'field':          field_label,
+                            'original_value': orig_str,
+                            'ai_value':       ai_str,
+                            'gb_value':       gb_str,
+                            'gb_state':       gb_state,
+                        })
                 self._batch_log.append({
+                    'book_id': str(book_id),
                     'title': metadata.get('title', _('Book ID {0}').format(book_id)),
-                    'fields': list(approved_data.keys()) if approved_data else [],
+                    'field_data': field_data,
                     'status': 'applied' if approved_data else 'skipped',
-                    'verification': metadata.get('_verification', {}).get('status', ''),
                 })
             else:
                 from calibre_plugins.ai_vision_metadata.ui import MetadataReviewDialog
-                d = MetadataReviewDialog(self.gui, metadata, cover_path, enabled_fields)
+                d = MetadataReviewDialog(self.gui, metadata, cover_path, enabled_fields,
+                                         provenance=metadata.get('_provenance', {}))
                 result = d.exec_()
                 approved_data = d.get_approved_data() if result == d.Accepted else None
                 d.setParent(None)
@@ -852,7 +940,10 @@ class AIVisionAction(InterfaceAction):
 
         except Exception as e:
             if getattr(self, 'batch_auto_apply', False):
-                self._batch_log.append({'title': _('Book ID {0}').format(book_id), 'fields': [], 'status': 'error', 'error': str(e)})
+                self._batch_log.append({
+                    'book_id': str(book_id), 'title': _('Book ID {0}').format(book_id),
+                    'field_data': [], 'status': 'error', 'error': str(e),
+                })
             else:
                 from calibre.gui2 import error_dialog
                 error_dialog(self.gui, _('UI Error'), _('Could not process book: {0}').format(str(e)), show=True)
@@ -863,7 +954,10 @@ class AIVisionAction(InterfaceAction):
     def _show_error_dialog(self, error_msg):
         """Displays error messages. In batch mode, logs silently instead of blocking."""
         if getattr(self, 'batch_auto_apply', False):
-            self._batch_log.append({'title': _('Unknown'), 'fields': [], 'status': 'error', 'error': error_msg})
+            self._batch_log.append({
+                'book_id': '', 'title': _('Unknown'),
+                'field_data': [], 'status': 'error', 'error': error_msg,
+            })
             self.process_next_in_queue()
         else:
             from calibre.gui2 import error_dialog
@@ -904,12 +998,6 @@ class AIVisionAction(InterfaceAction):
                 from calibre.ebooks.metadata import authors_to_sort_string
                 mi.author_sort = authors_to_sort_string(mi.authors)
                 
-        if 'series' in approved_data: 
-            mi.series = approved_data['series']
-        if 'series_index' in approved_data:
-            try: mi.series_index = float(approved_data['series_index'])
-            except ValueError: pass
-
         if 'publisher' in approved_data:
             mi.publisher = approved_data['publisher']
             
@@ -919,16 +1007,6 @@ class AIVisionAction(InterfaceAction):
                 mi.pubdate = datetime.datetime.strptime(approved_data['pubdate'], "%Y-%m-%d")
             except ValueError:
                 pass
-
-        if 'tags' in approved_data:
-            new_tags = [t.strip() for t in approved_data['tags'].split(',') if t.strip()]
-            existing_tags = mi.tags if mi.tags else []
-            existing_lower = {t.lower() for t in existing_tags}
-            for tag in new_tags:
-                if tag.lower() not in existing_lower:
-                    existing_tags.append(tag)
-                    existing_lower.add(tag.lower())
-            mi.tags = existing_tags
 
         # --- 2. Identifiers (Merge Dictionaries) ---
         if 'identifiers' in approved_data:
@@ -946,17 +1024,7 @@ class AIVisionAction(InterfaceAction):
             
             mi.identifiers = existing_ids
 
-        # --- 3. Comments (Append Text, no duplicates) ---
-        if 'comments' in approved_data:
-            new_comments = approved_data['comments']
-            existing_comments = mi.comments if mi.comments else ""
-            if new_comments and new_comments not in existing_comments:
-                if existing_comments.strip():
-                    mi.comments = f"{existing_comments}<br><br><b>AI Summary:</b><br>{new_comments}"
-                else:
-                    mi.comments = new_comments
-                
-        # --- 4. Pass the metadata to Calibre's new_api cache ---
+        # --- 3. Pass the metadata to Calibre's new_api cache ---
         db.set_metadata(book_id, mi)
         
         # --- 5. Force the UI to redraw ---

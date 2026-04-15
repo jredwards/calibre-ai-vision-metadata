@@ -25,27 +25,19 @@ ALL_FIELDS = [
     ('languages',    'Languages'),
     ('publisher',    'Publisher'),
     ('pubdate',      'Published Date'),
-    ('identifiers',  'Identifiers'),
-    ('series',       'Series'),
-    ('series_index', 'Series Index'),
-    ('tags',         'Tags'),
-    ('comments',     'Comments'),
+    ('identifiers',  'Identifiers (ISBN)'),
 ]
 
 # Groups shown in the configuration page, ordered by data source.
 # Each entry: (section_label, [field_keys])
 FIELD_GROUPS = [
     (
-        'From AI scan (read from cover image)',
-        ['title', 'authors', 'languages'],
+        'From AI scan (read from cover image, verified against Google Books)',
+        ['title', 'authors', 'languages', 'publisher'],
     ),
     (
-        'From Google Books (populated when book is verified)',
-        ['publisher', 'pubdate', 'identifiers'],
-    ),
-    (
-        'Manual entry only — not auto-populated by either source',
-        ['series', 'series_index', 'tags', 'comments'],
+        'From Google Books (populated when book is verified; publisher above used as fallback if not on cover)',
+        ['pubdate', 'identifiers'],
     ),
 ]
 ALL_FIELD_KEYS = [k for k, _ in ALL_FIELDS]
@@ -129,10 +121,27 @@ def clean_author_name(name):
     if not name:
         return None
 
+    # Strip AI placeholder sequences: "Niccol{} Machiavelli" → "Niccol Machiavelli"
+    name = re.sub(r'\{[^}]*\}', '', name).strip()
+    if not name:
+        return None
+
+    # Known suffixes that follow a comma but are NOT "Lastname, Firstname"
+    _SUFFIXES = {
+        'jr', 'sr', 'ii', 'iii', 'iv', 'v',
+        'md', 'phd', 'dds', 'do', 'jd', 'mba', 'ms', 'esq',
+    }
+
     # Rule 1: "Lastname, Firstname" → "Firstname Lastname"
+    # But if the part after the comma is a known suffix, drop it instead of reversing.
     if ',' in name:
         parts = name.split(',', 1)
-        name = parts[1].strip() + ' ' + parts[0].strip()
+        after = parts[1].strip()
+        after_bare = after.replace('.', '').replace(' ', '').lower()
+        if after_bare in _SUFFIXES:
+            name = parts[0].strip()   # discard the suffix
+        else:
+            name = after + ' ' + parts[0].strip()
 
     tokens = name.split()
     if not tokens:
@@ -329,21 +338,6 @@ def build_approved_data(metadata, enabled_fields):
         if creators_str.strip():
             approved['authors'] = creators_str.strip()
 
-    if 'series' in enabled_fields:
-        val = metadata.get('series')
-        if val not in _NULL_VALUES:
-            approved['series'] = str(val).strip()
-
-    if 'series_index' in enabled_fields:
-        val = metadata.get('series_index')
-        if val not in _NULL_VALUES:
-            approved['series_index'] = str(val).strip()
-
-    if 'tags' in enabled_fields:
-        tags = metadata.get('tags')
-        if tags:
-            approved['tags'] = ', '.join(str(t) for t in tags if t) if isinstance(tags, list) else str(tags)
-
     if 'languages' in enabled_fields:
         langs = metadata.get('languages')
         if langs:
@@ -368,10 +362,5 @@ def build_approved_data(metadata, enabled_fields):
         val = metadata.get('identifiers')
         if val not in _NULL_VALUES:
             approved['identifiers'] = str(val).strip()
-
-    if 'comments' in enabled_fields:
-        val = metadata.get('comments')
-        if val not in _NULL_VALUES:
-            approved['comments'] = str(val).strip()
 
     return approved

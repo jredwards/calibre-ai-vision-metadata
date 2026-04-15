@@ -1,6 +1,6 @@
 # __license__   = 'GPL v3'
 # __copyright__ = '2026, RelUnrelated <dan@relunrelated.com>'
-from qt.core import QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame, QLineEdit, QComboBox, QCheckBox, QPushButton, QDialogButtonBox, QTextEdit, QPixmap, Qt, QTreeWidget, QTreeWidgetItem, QHeaderView
+from qt.core import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QLineEdit, QComboBox, QCheckBox, QDialogButtonBox, QTextEdit, QPixmap, Qt, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QColor, QFont, QBrush
 
 try:
     load_translations()
@@ -8,7 +8,7 @@ except NameError:
     pass
 
 class MetadataReviewDialog(QDialog):
-    def __init__(self, parent, metadata, cover_path, enabled_fields=None):
+    def __init__(self, parent, metadata, cover_path, enabled_fields=None, provenance=None):
         super().__init__(parent)
         self.setWindowTitle(_("Review AI Metadata"))
         self.setMinimumWidth(900)
@@ -17,11 +17,18 @@ class MetadataReviewDialog(QDialog):
         self.metadata = metadata
         self.results = {}
 
-        # Fall back to all fields if no preference has been saved yet
-        ALL_FIELD_KEYS = ['title', 'authors', 'series', 'series_index', 'tags',
-                          'languages', 'publisher', 'pubdate', 'identifiers', 'comments']
         if enabled_fields is None:
-            enabled_fields = ALL_FIELD_KEYS
+            enabled_fields = ['title', 'authors', 'languages', 'publisher', 'pubdate', 'identifiers']
+        if provenance is None:
+            provenance = {}
+
+        _GB_STATUS_LABEL = {
+            'verified':     _('AI scan \u00b7 verified'),
+            'corrected':    _('AI scan \u00b7 verified'),
+            'title_only':   _('AI scan \u00b7 author unverified'),
+            'unverified':   _('AI scan \u00b7 no Google Books match'),
+            'rate_limited': _('AI scan \u00b7 rate limited'),
+        }
         
         # --- Centered Model Header ---
         model_name = metadata.get('ai_model_used', _('Unknown Model'))
@@ -122,9 +129,17 @@ class MetadataReviewDialog(QDialog):
 
         def add_field(key, label_text, value, mode):
             row_frame, row_layout = create_row_container()
-            
-            # Injecting a muted, italicized sub-label
-            rich_label = f"{label_text}<br><span style='color: gray; font-size: 10px;'><i>({mode})</i></span>"
+
+            # Build sub-label: mode + provenance source when available
+            p = provenance.get(key, {})
+            if p.get('ai') and p.get('gb'):
+                source = _('AI scan \u00b7 corrected by Google Books')
+            elif p.get('ai') is None and p.get('gb'):
+                source = _('from Google Books')
+            else:
+                source = _GB_STATUS_LABEL.get(p.get('gb_status', ''), '')
+            mode_text = f"{mode} \u00b7 {source}" if source else mode
+            rich_label = f"{label_text}<br><span style='color: gray; font-size: 10px;'><i>({mode_text})</i></span>"
             label = QLabel(rich_label)
             label.setFixedWidth(130)
             row_layout.addWidget(label)
@@ -136,59 +151,6 @@ class MetadataReviewDialog(QDialog):
             has_data = bool(str(value).strip() if value else False)
             chk.setChecked(has_data)
             row_layout.addWidget(chk)
-            
-            self.form_layout.addWidget(row_frame)
-            self.results[key] = {'checkbox': chk, 'widget': edit}
-
-        def add_indented_combo_field(key, label_text, options, mode):
-            row_frame, row_layout = create_row_container()
-            
-            unique_opts = []
-            for opt in options:
-                if opt and opt not in unique_opts:
-                    unique_opts.append(opt)
-
-            spacer = QLabel()
-            spacer.setFixedWidth(130)
-            row_layout.addWidget(spacer)
-            
-            row_layout.addStretch(1)
-            
-            # For the indented fields, we keep the mode text inline rather than breaking to a new line
-            rich_label = f"{label_text} <span style='color: gray; font-size: 10px;'><i>({mode})</i></span>"
-            label = QLabel(rich_label)
-            row_layout.addWidget(label)
-            
-            combo = QComboBox()
-            combo.setEditable(True)
-            combo.addItems(unique_opts)
-            combo.setMinimumWidth(120) 
-            row_layout.addWidget(combo)
-            
-            chk = QCheckBox()
-            chk.setChecked(bool(unique_opts))
-            row_layout.addWidget(chk)
-            
-            self.form_layout.addWidget(row_frame)
-            self.results[key] = {'checkbox': chk, 'widget': combo}
-
-        def add_text_area(key, label_text, value, mode):
-            row_frame, row_layout = create_row_container()
-            
-            rich_label = f"{label_text}<br><span style='color: gray; font-size: 10px;'><i>({mode})</i></span>"
-            label = QLabel(rich_label)
-            label.setFixedWidth(130)
-            row_layout.addWidget(label, alignment=Qt.AlignmentFlag.AlignTop)
-            
-            edit = QTextEdit()
-            edit.setPlainText(str(value) if value else "")
-            edit.setMaximumHeight(80) 
-            row_layout.addWidget(edit, 1)
-            
-            chk = QCheckBox(self)
-            has_data = bool(str(value).strip() if value else False)
-            chk.setChecked(has_data)
-            row_layout.addWidget(chk, alignment=Qt.AlignmentFlag.AlignTop)
             
             self.form_layout.addWidget(row_frame)
             self.results[key] = {'checkbox': chk, 'widget': edit}
@@ -207,32 +169,6 @@ class MetadataReviewDialog(QDialog):
                 else: raw_creators = []
             creators_str = ", ".join(raw_creators) if isinstance(raw_creators, list) else str(raw_creators)
             add_field("authors", _("Authors"), creators_str, _("Replaces"))
-
-        if 'series' in enabled_fields or 'series_index' in enabled_fields:
-            series_val = str(metadata.get('series', '')).strip()
-            vol = str(metadata.get('volume', '')).strip()
-            iss = str(metadata.get('issue_number', '')).strip()
-            direct_index = str(metadata.get('series_index', '')).strip()
-
-            index_options = []
-            if direct_index and direct_index not in ('None', 'null', ''):
-                index_options.append(direct_index)
-            if vol and iss and vol.isdigit() and iss.isdigit():
-                combined = f"{vol}.{iss.zfill(2)}"
-                if combined not in index_options:
-                    index_options.append(combined)
-            if iss and iss not in index_options:
-                index_options.append(iss)
-            if vol and vol not in index_options:
-                index_options.append(vol)
-            if 'series' in enabled_fields:
-                add_indented_combo_field('series', _('Series:'), [series_val], _("Replaces"))
-            if 'series_index' in enabled_fields:
-                add_indented_combo_field('series_index', _('Series Index:'), index_options, _("Replaces"))
-
-        if 'tags' in enabled_fields:
-            tags_str = ", ".join(metadata.get('tags', [])) if isinstance(metadata.get('tags', []), list) else str(metadata.get('tags', ''))
-            add_field("tags", _("Tags"), tags_str, _("Merges"))
 
         if 'languages' in enabled_fields:
             langs_str = ", ".join(metadata.get('languages', ['eng'])) if isinstance(metadata.get('languages', ['eng']), list) else str(metadata.get('languages', 'eng'))
@@ -256,9 +192,6 @@ class MetadataReviewDialog(QDialog):
 
         if 'identifiers' in enabled_fields:
             add_field("identifiers", _("Identifiers"), metadata.get('identifiers', ''), _("Merges"))
-
-        if 'comments' in enabled_fields:
-            add_text_area("comments", _("Comments"), metadata.get('comments', ''), _("Appends"))
 
         self.form_layout.addStretch(1)
 
@@ -304,27 +237,13 @@ class MetadataReviewDialog(QDialog):
 
 
 class BatchSummaryDialog(QDialog):
-    """Post-batch summary showing what was applied, skipped, or errored per book."""
-
-    _STATUS_LABELS = {
-        'applied':  'Applied',
-        'skipped':  'Skipped (no data)',
-        'error':    'Error',
-    }
-    _VERIFICATION_LABELS = {
-        'verified':     '✓ Verified',
-        'corrected':    '✎ Corrected',
-        'title_only':   '⚠ Title only',
-        'unverified':   '– Unverified',
-        'rate_limited': '⊗ Rate limited',
-        '':             '',
-    }
+    """Post-batch summary — flat table showing every field change at a glance."""
 
     def __init__(self, parent, batch_log):
         super().__init__(parent)
         self.setWindowTitle(_("Batch Processing Summary"))
-        self.setMinimumWidth(700)
-        self.setMinimumHeight(400)
+        self.setMinimumWidth(800)
+        self.setMinimumHeight(450)
 
         layout = QVBoxLayout(self)
 
@@ -338,29 +257,63 @@ class BatchSummaryDialog(QDialog):
         summary.setContentsMargins(0, 0, 0, 8)
         layout.addWidget(summary)
 
-        tree = QTreeWidget()
-        tree.setColumnCount(3)
-        tree.setHeaderLabels([_("Book"), _("Status"), _("Google Books")])
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        tree.setRootIsDecorated(True)
+        # Per-state display config: (symbol_prefix, hex_color, bold)
+        _GB_STYLE = {
+            'verified':     ('\u2713 ', '#2e7d32', False),   # green
+            'corrected':    ('\u2192 ', '#1565c0', True),    # bold blue, arrow
+            'enriched':     ('+ ',      '#1565c0', False),   # blue
+            'unverified':   ('\u26a0 ', '#e65100', False),   # orange
+            'rate_limited': ('\u29d7 ', '#757575', False),   # gray
+            'error':        ('\u2717 ', '#c62828', False),   # red
+            'skipped':      ('\u2013 ', '#757575', False),   # gray
+        }
 
+        # Build flat row list: (book_id, field, original_value, ai_value, gb_value, gb_state)
+        rows = []
         for entry in batch_log:
-            status_label = self._STATUS_LABELS.get(entry['status'], entry['status'])
-            verification_label = self._VERIFICATION_LABELS.get(entry.get('verification', ''), '')
-            row = QTreeWidgetItem([entry['title'], status_label, verification_label])
-
+            book_id    = entry.get('book_id', '')
+            book_title = entry['title']
             if entry['status'] == 'error':
-                child = QTreeWidgetItem([entry.get('error', ''), '', ''])
-                row.addChild(child)
-            elif entry.get('fields'):
-                child = QTreeWidgetItem([', '.join(entry['fields']), '', ''])
-                row.addChild(child)
+                rows.append((book_id, _('Error'), book_title, '', entry.get('error', ''), 'error'))
+            elif entry['status'] == 'skipped':
+                rows.append((book_id, '\u2013', book_title, '', _('No metadata extracted'), 'skipped'))
+            else:
+                for fd in entry.get('field_data', []):
+                    rows.append((book_id, fd['field'],
+                                 fd.get('original_value', ''),
+                                 fd['ai_value'], fd['gb_value'],
+                                 fd.get('gb_state', '')))
 
-            tree.addTopLevelItem(row)
+        table = QTableWidget(len(rows), 5)
+        table.setHorizontalHeaderLabels([_("ID"), _("Field"), _("Original Value"),
+                                         _("AI Scan"), _("Google Books Verification")])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
 
-        layout.addWidget(tree)
+        for row_idx, (book_id, field, orig_val, ai_val, gb_val, gb_state) in enumerate(rows):
+            table.setItem(row_idx, 0, QTableWidgetItem(book_id))
+            table.setItem(row_idx, 1, QTableWidgetItem(field))
+            table.setItem(row_idx, 2, QTableWidgetItem(orig_val))
+            table.setItem(row_idx, 3, QTableWidgetItem(ai_val))
+
+            symbol, color_hex, bold = _GB_STYLE.get(gb_state, ('', None, False))
+            gb_item = QTableWidgetItem(symbol + gb_val)
+            if color_hex:
+                gb_item.setForeground(QBrush(QColor(color_hex)))
+            if bold:
+                f = QFont()
+                f.setBold(True)
+                gb_item.setFont(f)
+            table.setItem(row_idx, 4, gb_item)
+
+        layout.addWidget(table)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)

@@ -139,6 +139,20 @@ class TestCleanAuthorName:
     def test_last_first_with_initials(self):
         assert clean_author_name('Rowling, J.K.') == 'J.K. Rowling'
 
+    # --- Suffix handling (must not be treated as initials or trigger reversal) ---
+    def test_suffix_md_not_moved_to_front(self):
+        assert clean_author_name('John Smith, M.D.') == 'John Smith'
+
+    def test_suffix_phd_not_moved_to_front(self):
+        assert clean_author_name('Jane Doe, Ph.D.') == 'Jane Doe'
+
+    def test_suffix_jr_not_moved_to_front(self):
+        assert clean_author_name('Robert Jones, Jr.') == 'Robert Jones'
+
+    def test_suffix_without_comma_left_alone(self):
+        # "John Smith Jr." — no comma, suffix stays in place
+        assert clean_author_name('John Smith Jr.') == 'John Smith Jr.'
+
     # --- Trailing initial rejection ---
     def test_trailing_initial_rejected(self):
         assert clean_author_name('John S.') is None
@@ -183,6 +197,18 @@ class TestCleanAuthorName:
     def test_lowercase_last_name_unchanged(self):
         # e.g. "bell hooks" — deliberate lowercase, we don't touch mixed-case tokens
         assert clean_author_name('bell hooks') == 'bell hooks'
+
+    # --- AI placeholder stripping ---
+    def test_empty_braces_stripped(self):
+        # AI returns "{}" when it can't render a non-ASCII character
+        assert clean_author_name('Niccol{} Machiavelli') == 'Niccol Machiavelli'
+
+    def test_nonempty_braces_stripped(self):
+        # AI returns "{o}" or similar unicode fallback
+        assert clean_author_name('Niccol{o} Machiavelli') == 'Niccol Machiavelli'
+
+    def test_braces_only_returns_none(self):
+        assert clean_author_name('{}') is None
 
 
 # ---------------------------------------------------------------------------
@@ -396,38 +422,29 @@ class TestBuildApprovedData:
         return {
             'title':       'Dune',
             'creators':    ['Frank Herbert'],
-            'series':      'Dune Chronicles',
-            'series_index': '1',
-            'tags':        ['sci-fi', 'epic'],
             'languages':   ['eng'],
             'publisher':   'Chilton Books',
             'pub_year':    1965,
             'pub_month':   8,
             'pub_day':     1,
             'identifiers': 'isbn:9780441013593',
-            'comments':    'A masterwork of science fiction.',
         }
 
     def test_all_fields_present(self):
         result = build_approved_data(self._full_meta(), ALL)
         assert result['title'] == 'Dune'
         assert result['authors'] == 'Frank Herbert'
-        assert result['series'] == 'Dune Chronicles'
-        assert result['series_index'] == '1'
-        assert result['tags'] == 'sci-fi, epic'
         assert result['languages'] == 'eng'
         assert result['publisher'] == 'Chilton Books'
         assert result['pubdate'] == '1965-08-01'
         assert result['identifiers'] == 'isbn:9780441013593'
-        assert result['comments'] == 'A masterwork of science fiction.'
 
     def test_disabled_fields_excluded(self):
         result = build_approved_data(self._full_meta(), ['title', 'authors'])
         assert 'title' in result
         assert 'authors' in result
-        assert 'series' not in result
-        assert 'tags' not in result
         assert 'pubdate' not in result
+        assert 'identifiers' not in result
 
     def test_null_title_excluded(self):
         meta = self._full_meta()
@@ -453,10 +470,6 @@ class TestBuildApprovedData:
         del meta['pub_year']
         result = build_approved_data(meta, ALL)
         assert 'pubdate' not in result
-
-    def test_tags_as_list_joined(self):
-        result = build_approved_data(self._full_meta(), ['tags'])
-        assert result['tags'] == 'sci-fi, epic'
 
     def test_languages_as_list_joined(self):
         meta = {**self._full_meta(), 'languages': ['eng', 'fra']}
