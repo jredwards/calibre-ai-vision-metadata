@@ -8,6 +8,7 @@ from helpers import (
     strip_null_values,
     clean_title,
     clean_author_name,
+    clean_publisher,
     verify_with_google_books,
     build_approved_data,
     ALL_FIELD_KEYS,
@@ -115,6 +116,37 @@ class TestCleanTitle:
 
     def test_numbers_not_affected(self):
         assert clean_title('catch 22') == 'Catch 22'
+
+
+# ---------------------------------------------------------------------------
+# clean_publisher
+# ---------------------------------------------------------------------------
+
+class TestCleanPublisher:
+    def test_all_caps_corrected(self):
+        assert clean_publisher('PENGUIN BOOKS') == 'Penguin Books'
+
+    def test_all_lowercase_corrected(self):
+        assert clean_publisher('penguin books') == 'Penguin Books'
+
+    def test_mixed_case_untouched(self):
+        assert clean_publisher('HarperCollins') == 'HarperCollins'
+
+    def test_already_correct_untouched(self):
+        assert clean_publisher('Penguin Books') == 'Penguin Books'
+
+    def test_articles_capitalised_unlike_title(self):
+        # Publisher: every word capitalised — no article exceptions
+        assert clean_publisher('UNIVERSITY OF CHICAGO PRESS') == 'University Of Chicago Press'
+
+    def test_single_word_all_caps(self):
+        assert clean_publisher('SCHOLASTIC') == 'Scholastic'
+
+    def test_empty_string(self):
+        assert clean_publisher('') == ''
+
+    def test_non_string_passthrough(self):
+        assert clean_publisher(None) is None
 
 
 # ---------------------------------------------------------------------------

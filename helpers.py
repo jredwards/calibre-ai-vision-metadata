@@ -32,11 +32,11 @@ ALL_FIELDS = [
 # Each entry: (section_label, [field_keys])
 FIELD_GROUPS = [
     (
-        'From AI scan (read from cover image, verified against Google Books)',
+        'From AI scan (verified/corrected by Google Books)',
         ['title', 'authors', 'languages', 'publisher'],
     ),
     (
-        'From Google Books (populated when book is verified; publisher above used as fallback if not on cover)',
+        'From Google Books (populated when book is verified)',
         ['pubdate', 'identifiers'],
     ),
 ]
@@ -94,6 +94,26 @@ def clean_title(title):
         else:
             result.append(word.lower())
     return ' '.join(result)
+
+# ---------------------------------------------------------------------------
+# Publisher name cleanup
+# ---------------------------------------------------------------------------
+
+def clean_publisher(name):
+    """Title-case a publisher name when the AI returned ALL CAPS or all lowercase.
+
+    No article/preposition exceptions — every word is capitalised
+    (unlike clean_title, which keeps 'of', 'the', etc. lowercase mid-title).
+    Leaves already-mixed names (e.g. "HarperCollins") untouched.
+    """
+    if not isinstance(name, str):
+        return name
+    alpha_chars = [c for c in name if c.isalpha()]
+    if not alpha_chars:
+        return name
+    if not (all(c.isupper() for c in alpha_chars) or all(c.islower() for c in alpha_chars)):
+        return name
+    return ' '.join(word.capitalize() for word in name.split())
 
 # ---------------------------------------------------------------------------
 # Author name cleanup
@@ -202,7 +222,7 @@ def _default_fetch(url, _retries=3, _backoff=1):
             raise
 
 
-def verify_with_google_books(title, creators, api_key=None, _fetch_fn=None):
+def verify_with_google_books(title, creators, api_key=None, publisher=None, _fetch_fn=None):
     """Query Google Books to verify and correct the title/author combination.
 
     Two-pass strategy:
@@ -241,7 +261,8 @@ def verify_with_google_books(title, creators, api_key=None, _fetch_fn=None):
 
     # Pass 1: title + author; Pass 2: title only
     inauthor = f'+inauthor:{urllib.parse.quote(creator_str.replace(".", " "))}' if creator_str else ''
-    items = run_query(f'intitle:{urllib.parse.quote(title)}{inauthor}')
+    inpublisher = f'+inpublisher:{urllib.parse.quote(publisher)}' if publisher else ''
+    items = run_query(f'intitle:{urllib.parse.quote(title)}{inauthor}{inpublisher}')
     if items is _RATE_LIMITED:
         return {'status': 'rate_limited', 'corrections': {}}
     if items is None:

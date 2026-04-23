@@ -16,7 +16,7 @@ from calibre_plugins.ai_vision_metadata.config import prefs
 from calibre_plugins.ai_vision_metadata.helpers import (
     ALL_FIELDS, ALL_FIELD_KEYS, FIELD_GROUPS,
     is_null_value, strip_null_values,
-    clean_title, clean_author_name,
+    clean_title, clean_author_name, clean_publisher,
     verify_with_google_books,
     build_approved_data,
 )
@@ -145,7 +145,7 @@ class ConfigWidget(QWidget):
 
         self.timeout_spin = QSpinBox(self)
         self.timeout_spin.setRange(30, 86400)
-        self.timeout_spin.setValue(int(prefs.get('timeout', 300)))
+        self.timeout_spin.setValue(int(prefs.get('timeout', 120)))
         self.l.addWidget(self.timeout_spin)
 
         self.label_delay = QLabel(_('Delay Between Batch Requests (seconds):'))
@@ -179,6 +179,7 @@ class ConfigWidget(QWidget):
 
         for group_label, keys in FIELD_GROUPS:
             header = QLabel(_(f'<b>{group_label}:</b>'))
+            header.setWordWrap(True)
             header.setContentsMargins(0, 8, 0, 2)
             self.l.addWidget(header)
 
@@ -658,8 +659,8 @@ class AIVisionAction(InterfaceAction):
 
         import urllib.error
         
-        # Fetch the user-defined timeout, defaulting to 300 if not found
-        timeout_val = int(prefs.get('timeout', 300))
+        # Fetch the user-defined timeout, defaulting to 120 if not found
+        timeout_val = int(prefs.get('timeout', 120))
         
         try:
             data = json.dumps(payload).encode('utf-8')
@@ -690,7 +691,7 @@ class AIVisionAction(InterfaceAction):
                     return {"error_msg": _("{0} API Error (HTTP {1}): {2}").format(provider, http_err.code, error_body)}
 
             except TimeoutError:
-                return {"error_msg": _("The AI took too long to analyze the cover and search the web. Please try again.")}
+                return {"error_msg": _("Request timed out after {0}s. The AI API did not respond in time.").format(timeout_val)}
             except urllib.error.URLError as url_err:
                 return {"error_msg": _("Network connection failed: {0}").format(url_err.reason)}
             except Exception as e:
@@ -748,6 +749,11 @@ class AIVisionAction(InterfaceAction):
                     metadata['title'] = clean_title(metadata['title'])
                 # ---------------------------------------------------
 
+                # --- Clean up publisher name capitalisation ---
+                if isinstance(metadata.get('publisher'), str):
+                    metadata['publisher'] = clean_publisher(metadata['publisher'])
+                # ---------------------------------------------------
+
                 # --- Clean up author names ---
                 raw_creators = metadata.get('creators')
                 if raw_creators is not None:
@@ -766,7 +772,8 @@ class AIVisionAction(InterfaceAction):
                     verification = verify_with_google_books(
                         metadata['title'],
                         metadata.get('creators'),
-                        api_key=gb_api_key
+                        api_key=gb_api_key,
+                        publisher=metadata.get('publisher'),
                     )
                     corrections = verification.get('corrections', {})
                     v_status = verification.get('status', 'unverified')
@@ -789,9 +796,10 @@ class AIVisionAction(InterfaceAction):
                     if 'identifiers' in enabled_fields and enrichment.get('isbn'):
                         metadata['identifiers'] = f"isbn:{enrichment['isbn']}"
                         provenance['identifiers'] = {'ai': None, 'gb': metadata['identifiers']}
-                    if 'publisher' in enabled_fields and enrichment.get('publisher') and not had_publisher:
+                    if 'publisher' in enabled_fields and enrichment.get('publisher'):
+                        ai_publisher = metadata.get('publisher') if had_publisher else None
                         metadata['publisher'] = enrichment['publisher']
-                        provenance['publisher'] = {'ai': None, 'gb': metadata['publisher']}
+                        provenance['publisher'] = {'ai': ai_publisher, 'gb': metadata['publisher']}
                     if 'pubdate' in enabled_fields and enrichment.get('pubdate') and not metadata.get('pub_year'):
                         # publishedDate may be "YYYY", "YYYY-MM", or "YYYY-MM-DD"
                         parts = enrichment['pubdate'].split('-')
@@ -852,10 +860,26 @@ class AIVisionAction(InterfaceAction):
 
     def job_finished(self, job):
         if job.failed:
-            return self.gui.job_exception(job, dialog_title=_("AI Vision Failed"))
-            
+            if getattr(self, 'batch_auto_apply', False):
+                # In batch mode: log the failure silently and keep the queue moving.
+                # Showing a blocking dialog here would stall the batch permanently.
+                error_msg = str(getattr(job, 'exception', None) or _('Job failed (unknown error)'))
+                try:
+                    failed_book_id = str(job.args[0]) if getattr(job, 'args', None) else ''
+                except Exception:
+                    failed_book_id = ''
+                self._batch_log.append({
+                    'book_id': failed_book_id,
+                    'title': _('Book ID {0}').format(failed_book_id) if failed_book_id else _('Unknown'),
+                    'field_data': [], 'status': 'error', 'error': error_msg,
+                })
+                self.process_next_in_queue()
+            else:
+                self.gui.job_exception(job, dialog_title=_("AI Vision Failed"))
+            return
+
         result = job.result
-        
+
         if "error_msg" in result:
             self.signals.error_signal.emit(result["error_msg"])
             return

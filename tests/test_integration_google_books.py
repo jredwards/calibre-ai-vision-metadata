@@ -17,8 +17,6 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 # "Of Wings of Blood" → should correct to "On Wings of Blood"
 #
-# Cover fixture: tests/fixtures/on_wings_of_blood_cover.jpg
-# Source:        Calibre Library / Briar Boleyn / cover.jpg
 # The AI misreads the stylised 'n' in "On" as 'f', returning "Of Wings of Blood".
 # ---------------------------------------------------------------------------
 
